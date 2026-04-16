@@ -1,0 +1,278 @@
+"""Smoke tests for Glitch Signal.
+
+All tests use DISPATCH_MODE=dry_run and mock external API calls.
+These run without any network access or real credentials.
+"""
+from __future__ import annotations
+
+import os
+import uuid
+
+import pytest
+
+# Force dry-run for all tests
+os.environ["DISPATCH_MODE"] = "dry_run"
+os.environ["SIGNAL_DB_URL"] = "sqlite+aiosqlite:///:memory:"
+os.environ["TELEGRAM_BOT_TOKEN_SIGNAL"] = "0:test"
+os.environ["TELEGRAM_ADMIN_IDS"] = "0"
+os.environ["ANTHROPIC_API_KEY"] = "test"
+os.environ["GOOGLE_API_KEY"] = "test"
+
+
+# ---------------------------------------------------------------------------
+# 1. Guardrail tests — hard stops must fire, never create OrmResponse
+# ---------------------------------------------------------------------------
+
+class TestGuardrails:
+    """Pure rule engine — no network, no DB."""
+
+    def test_hard_stop_legal(self):
+        from glitch_signal.orm.guardrails import check
+        is_safe, phrase = check("You're breaking SEC regulations!")
+        assert not is_safe
+        assert "SEC" in phrase
+
+    def test_hard_stop_loss(self):
+        from glitch_signal.orm.guardrails import check
+        is_safe, phrase = check("I lost $500 trading with your bot")
+        assert not is_safe
+        assert phrase in ("loss", "lost $")
+
+    def test_hard_stop_guarantee(self):
+        from glitch_signal.orm.guardrails import check
+        is_safe, _ = check("Can you guarantee returns of 20%?")
+        assert not is_safe
+
+    def test_hard_stop_lawsuit(self):
+        from glitch_signal.orm.guardrails import check
+        is_safe, phrase = check("I'm going to take legal action against you")
+        assert not is_safe
+
+    def test_safe_positive(self):
+        from glitch_signal.orm.guardrails import check
+        is_safe, phrase = check("Great bot! The cobra mascot is amazing.")
+        assert is_safe
+        assert phrase is None
+
+    def test_safe_faq(self):
+        from glitch_signal.orm.guardrails import check
+        is_safe, phrase = check("How do I get access to the trading platform?")
+        assert is_safe
+        assert phrase is None
+
+    def test_case_insensitive(self):
+        from glitch_signal.orm.guardrails import check
+        # "SEBI" in uppercase
+        is_safe, _ = check("This violates sebi rules")
+        assert not is_safe
+
+
+# ---------------------------------------------------------------------------
+# 2. VideoRouter — deterministic, no LLM, no DB
+# ---------------------------------------------------------------------------
+
+class TestVideoRouter:
+    """Routing table maps hints to models per brand.config."""
+
+    @pytest.mark.asyncio
+    async def test_dry_run_forces_mock(self):
+        from glitch_signal.agent.nodes.video_router import video_router_node
+
+        state = {
+            "shots": [
+                {"visual": "hero shot", "duration_s": 5, "model_hint": "cinematic"},
+                {"visual": "product demo", "duration_s": 5, "model_hint": "realistic"},
+            ]
+        }
+        result = await video_router_node(state)
+        routed = result["routed_shots"]
+        assert len(routed) == 2
+        # dry_run forces all to "mock"
+        assert all(s["model"] == "mock" for s in routed)
+
+    @pytest.mark.asyncio
+    async def test_empty_shots_returns_error(self):
+        from glitch_signal.agent.nodes.video_router import video_router_node
+
+        state = {"shots": []}
+        result = await video_router_node(state)
+        assert "error" in result
+
+
+# ---------------------------------------------------------------------------
+# 3. Kling mock — dry_run returns mock result
+# ---------------------------------------------------------------------------
+
+class TestKlingMock:
+    @pytest.mark.asyncio
+    async def test_generate_dry_run(self):
+        from glitch_signal.video_models.kling import KlingModel
+        from glitch_signal.video_models.base import VideoGenerationRequest
+
+        model = KlingModel()
+        req = VideoGenerationRequest(prompt="cobra in neon city", duration_s=5)
+        result = await model.generate(req)
+
+        assert result.api_job_id.startswith("mock-")
+        assert result.status == "pending"
+        assert result.cost_usd == pytest.approx(0.14, abs=0.01)
+
+    @pytest.mark.asyncio
+    async def test_poll_dry_run(self):
+        from glitch_signal.video_models.kling import KlingModel
+
+        model = KlingModel()
+        result = await model.poll("mock-abc123")
+
+        assert result.status == "done"
+        assert result.video_url is not None
+
+    def test_get_model_unknown_raises(self):
+        from glitch_signal.video_models.kling import get_model
+        with pytest.raises(ValueError, match="Unknown video model"):
+            get_model("nonexistent_model")
+
+
+# ---------------------------------------------------------------------------
+# 4. Scheduler veto window promotion — in-memory SQLite
+# ---------------------------------------------------------------------------
+
+class TestSchedulerVetoPromotion:
+    @pytest.mark.asyncio
+    async def test_veto_deadline_promotes_to_queued(self):
+        from datetime import datetime, timedelta, timezone
+
+        from sqlmodel import SQLModel
+        from sqlalchemy.ext.asyncio import create_async_engine
+        from sqlalchemy.orm import sessionmaker
+        from sqlmodel.ext.asyncio.session import AsyncSession
+
+        # In-memory DB for this test
+        engine = create_async_engine("sqlite+aiosqlite:///:memory:", echo=False)
+        async with engine.begin() as conn:
+            await conn.run_sync(SQLModel.metadata.create_all)
+
+        factory = sessionmaker(bind=engine, class_=AsyncSession, expire_on_commit=False)
+
+        # Create an expired pending_veto post
+        from glitch_signal.db.models import VideoAsset, ScheduledPost
+
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        past = now - timedelta(seconds=1)
+
+        asset_id = str(uuid.uuid4())
+        sp_id = str(uuid.uuid4())
+
+        async with factory() as session:
+            # Need a VideoAsset first (FK constraint)
+            asset = VideoAsset(
+                id=asset_id,
+                script_id=str(uuid.uuid4()),
+                file_path="/tmp/test.mp4",
+                duration_s=30.0,
+                created_at=now,
+            )
+            session.add(asset)
+            sp = ScheduledPost(
+                id=sp_id,
+                asset_id=asset_id,
+                platform="youtube_shorts",
+                scheduled_for=now,
+                status="pending_veto",
+                veto_deadline=past,
+            )
+            session.add(sp)
+            await session.commit()
+
+        # Patch session factory to use our in-memory DB
+        import glitch_signal.scheduler.queue as q
+        import glitch_signal.db.session as db_session
+
+        original_factory = db_session._session_factory
+
+        def patched_factory():
+            return factory
+
+        db_session._session_factory = patched_factory
+
+        try:
+            await q._promote_veto_windows()
+        finally:
+            db_session._session_factory = original_factory
+
+        async with factory() as session:
+            from sqlmodel import select
+            result = await session.execute(
+                select(ScheduledPost).where(ScheduledPost.id == sp_id)
+            )
+            updated = result.scalar_one_or_none()
+
+        assert updated is not None
+        assert updated.status == "queued"
+
+
+# ---------------------------------------------------------------------------
+# 5. Classifier dry-run — returns positive tier
+# ---------------------------------------------------------------------------
+
+class TestClassifierDryRun:
+    @pytest.mark.asyncio
+    async def test_dry_run_returns_positive(self):
+        from glitch_signal.orm.classifier import classify
+
+        result = await classify("Great bot! Love the cobra.", "twitter")
+        assert result["tier"] == "positive"
+        assert result["confidence"] == 1.0
+
+
+# ---------------------------------------------------------------------------
+# 6. Server health check — startup without real DB
+# ---------------------------------------------------------------------------
+
+class TestServerHealth:
+    @pytest.mark.asyncio
+    async def test_healthz_returns_ok(self):
+        """Test healthz endpoint structure (no real DB connection)."""
+        from unittest.mock import AsyncMock, patch
+
+        with patch("glitch_signal.server._session_factory") as mock_factory:
+            mock_session = AsyncMock()
+            mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+            mock_session.__aexit__ = AsyncMock(return_value=False)
+            mock_session.execute = AsyncMock(return_value=AsyncMock(scalars=lambda: AsyncMock(all=lambda: [])))
+            mock_factory.return_value = mock_session
+
+            from glitch_signal.server import healthz
+            result = await healthz()
+
+        assert result["status"] == "ok"
+        assert result["service"] == "glitch-signal"
+        assert "queue" in result
+
+
+# ---------------------------------------------------------------------------
+# 7. Config loading
+# ---------------------------------------------------------------------------
+
+class TestConfig:
+    def test_is_dry_run(self):
+        from glitch_signal.config import settings
+        s = settings()
+        assert s.is_dry_run is True  # set at top of this file
+
+    def test_brand_config_loads_defaults(self):
+        from glitch_signal.config import brand_config
+        bc = brand_config()
+        assert bc["brand"]["accent_color"] == "#00ff88"
+        assert bc["brand"]["base_color"] == "#0a0a0f"
+        assert "hard_stop_phrases" in bc["orm_guardrails"]
+
+    def test_admin_ids_parsing(self):
+        from glitch_signal.config import Settings
+        s = Settings(telegram_admin_ids="123,456,789")
+        assert s.admin_telegram_ids == {123, 456, 789}
+
+    def test_github_repo_list(self):
+        from glitch_signal.config import Settings
+        s = Settings(github_repos="glitch-cod-confirm,glitch-grow-ads-agent")
+        assert s.github_repo_list == ["glitch-cod-confirm", "glitch-grow-ads-agent"]

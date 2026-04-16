@@ -1,0 +1,45 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+.eggs/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+htmlcov/
+.coverage
+
+# Environment — never commit
+.env
+*.env
+
+# Credentials — never commit
+credentials/
+*.json.credentials
+youtube_token.json
+
+# Brand config (private)
+brand.config.json
+
+# Generated videos — large binary files
+/var/lib/glitch-signal/
+*.mp4
+*.mov
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Alembic
+alembic/versions/*.pyc
