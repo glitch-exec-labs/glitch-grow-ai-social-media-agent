@@ -78,6 +78,14 @@ class Settings(BaseSettings):
     brand_configs_dir: str = "brand/configs"              # multi-brand dir
     default_brand_id: str = "glitch_executor"
 
+    # --- Make.com (automation platform) ---
+    # Zone-bound. us1 / us2 / eu1 / eu2 — do NOT mix zones across base URL
+    # and token; a token issued on us2 is rejected by us1 and vice versa.
+    make_base_url: str = "https://us2.make.com"
+    make_api_base: str = "https://us2.make.com/api/v2"
+    make_org_id: str = ""
+    make_api_token: str = ""
+
     # --- Retry windows (ms) ---
     publish_retry_1_ms: int = 1_800_000   # 30 min
     publish_retry_2_ms: int = 7_200_000   # 2 h
