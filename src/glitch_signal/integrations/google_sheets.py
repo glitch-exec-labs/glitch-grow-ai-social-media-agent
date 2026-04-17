@@ -30,7 +30,8 @@ from __future__ import annotations
 
 import asyncio
 import pathlib
-from functools import lru_cache
+import time
+from functools import lru_cache, wraps
 from typing import Any
 
 import structlog
@@ -40,6 +41,39 @@ from glitch_signal.config import settings
 log = structlog.get_logger(__name__)
 
 _SHEETS_SCOPE = "https://www.googleapis.com/auth/spreadsheets"
+
+# Google Sheets per-user-per-project write quota is 60/min. The first
+# drive_scout tick on a 65-file brand or a mass reconciliation will
+# blow straight through that. Wrap every write with exponential backoff
+# on 429 (also covers transient 5xx) so the agent self-heals.
+_RETRY_ON_HTTP_CODES = {429, 500, 502, 503}
+_MAX_RETRIES = 5
+_BASE_BACKOFF_S = 2.0
+
+
+def _with_retry(fn):
+    @wraps(fn)
+    def wrapped(*args, **kwargs):
+        from googleapiclient.errors import HttpError
+
+        for attempt in range(_MAX_RETRIES):
+            try:
+                return fn(*args, **kwargs)
+            except HttpError as exc:
+                status = getattr(exc, "status_code", None) or getattr(
+                    getattr(exc, "resp", None), "status", None
+                )
+                if status not in _RETRY_ON_HTTP_CODES or attempt == _MAX_RETRIES - 1:
+                    raise
+                delay = _BASE_BACKOFF_S * (2 ** attempt)
+                log.info(
+                    "google_sheets.retry_backoff",
+                    status=status, attempt=attempt + 1, delay_s=delay,
+                )
+                time.sleep(delay)
+        # Unreachable — loop either returns or raises.
+        raise RuntimeError("google_sheets: retry loop exited without outcome")
+    return wrapped
 
 
 @lru_cache(maxsize=1)
@@ -113,6 +147,7 @@ async def update_row_by_key(
 # Sync workers — called via asyncio.to_thread
 # ---------------------------------------------------------------------------
 
+@_with_retry
 def _ensure_header_sync(sheet_id: str, worksheet: str, columns: list[str]) -> None:
     svc = _service()
     rng = f"'{worksheet}'!1:1"
@@ -136,6 +171,7 @@ def _ensure_header_sync(sheet_id: str, worksheet: str, columns: list[str]) -> No
     )
 
 
+@_with_retry
 def _append_row_sync(
     sheet_id: str, worksheet: str, columns: list[str], row: dict[str, Any]
 ) -> None:
@@ -156,6 +192,7 @@ def _append_row_sync(
     )
 
 
+@_with_retry
 def _update_row_sync(
     sheet_id: str,
     worksheet: str,
