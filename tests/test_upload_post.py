@@ -115,6 +115,191 @@ class TestPlatformExtras:
         assert _platform_extras("bluesky", {"anything": 1}) == {}
 
 
+class TestNoTitleForShortFormPlatforms:
+    """TikTok / IG / X etc. don't have a title concept — passing one leaks
+    into the caption body. _publish_sync should skip the title kwarg for
+    these and only pass it to YouTube / Pinterest / LinkedIn."""
+
+    def test_tiktok_call_omits_title(self, monkeypatch):
+        from glitch_signal.platforms import upload_post as up
+
+        captured: dict = {}
+
+        class _C:
+            def upload_video(self, **kwargs):
+                captured.update(kwargs)
+                return {"success": True, "request_id": "r"}
+            def get_status(self, request_id):
+                return {"status": "completed", "results": [{"platform": "tiktok", "post_url": None, "platform_post_id": None}]}
+
+        import sys
+        monkeypatch.setitem(
+            sys.modules,
+            "upload_post",
+            type("M", (), {"UploadPostClient": lambda api_key=None: _C()}),
+        )
+
+        up._publish_sync(
+            api_key="k", user="Namhya", target_platform="tiktok",
+            video_url="https://x/media/fetch?token=t",
+            caption="Body text here #foo", title="Would leak into caption",
+            extras={}, poll_timeout_s=5,
+        )
+        assert "title" not in captured, f"title should NOT be in tiktok upload kwargs, got {list(captured)}"
+        assert captured.get("description") == "Body text here #foo"
+
+    def test_youtube_call_includes_title(self, monkeypatch):
+        from glitch_signal.platforms import upload_post as up
+
+        captured: dict = {}
+
+        class _C:
+            def upload_video(self, **kwargs):
+                captured.update(kwargs)
+                return {"success": True, "request_id": "r"}
+            def get_status(self, request_id):
+                return {"status": "completed", "results": [{"platform": "youtube", "post_url": "https://youtu.be/abc", "platform_post_id": "abc"}]}
+
+        import sys
+        monkeypatch.setitem(
+            sys.modules,
+            "upload_post",
+            type("M", (), {"UploadPostClient": lambda api_key=None: _C()}),
+        )
+
+        up._publish_sync(
+            api_key="k", user="Namhya", target_platform="youtube",
+            video_url="https://x/media/fetch?token=t",
+            caption="Body text", title="Real YouTube Title",
+            extras={}, poll_timeout_s=5,
+        )
+        assert captured.get("title") == "Real YouTube Title"
+
+
+class TestPollUntilDone:
+    def test_finds_post_url_from_results_list(self):
+        from glitch_signal.platforms.upload_post import _poll_until_done
+
+        class _C:
+            def get_status(self, request_id):
+                return {"status": "completed", "results": [
+                    {"platform": "tiktok", "success": True,
+                     "platform_post_id": "762976", "post_url": "https://tt/x/video/1"}
+                ]}
+
+        ppid, url = _poll_until_done(_C(), "req-123", "tiktok", timeout_s=10)
+        assert ppid == "762976"
+        assert url == "https://tt/x/video/1"
+
+    def test_timeout_returns_none(self, monkeypatch):
+        from glitch_signal.platforms import upload_post as up
+
+        class _C:
+            def get_status(self, request_id):
+                return {"status": "processing", "results": [{"platform": "tiktok"}]}
+
+        import time
+        monkeypatch.setattr(time, "sleep", lambda *_: None)
+
+        ppid, url = up._poll_until_done(_C(), "req", "tiktok", timeout_s=1)
+        assert ppid is None and url is None
+
+    def test_platform_error_raises(self):
+        from glitch_signal.platforms.upload_post import _poll_until_done
+
+        class _C:
+            def get_status(self, request_id):
+                return {"status": "completed", "results": [
+                    {"platform": "tiktok", "success": False,
+                     "error_message": "video rejected by TikTok"}
+                ]}
+
+        with pytest.raises(RuntimeError, match="video rejected"):
+            _poll_until_done(_C(), "req", "tiktok", timeout_s=10)
+
+
+class TestResolvePublishPlatform:
+    """Brand config drives which publisher wins. Upload-Post beats Zernio
+    beats direct. If nothing is enabled, raise clearly."""
+
+    def _write_brand(self, configs_dir, brand_id: str, platforms: dict):
+        import json
+        (configs_dir / f"{brand_id}.json").write_text(json.dumps({
+            "brand_id": brand_id,
+            "display_name": brand_id,
+            "timezone": "UTC",
+            "platforms": platforms,
+        }))
+
+    def test_upload_post_beats_zernio(self, tmp_path, monkeypatch):
+        configs = tmp_path / "configs"
+        configs.mkdir()
+        self._write_brand(configs, "nmahya", {
+            "upload_post_tiktok": {"enabled": True, "user": "Namhya"},
+            "zernio_tiktok":      {"enabled": True, "account_id": "z1"},
+            "tiktok":             {"enabled": True},
+        })
+        monkeypatch.setenv("BRAND_CONFIGS_DIR", str(configs))
+        monkeypatch.setenv("DEFAULT_BRAND_ID", "nmahya")
+
+        from glitch_signal import config as cfg
+        cfg.settings.cache_clear()
+        cfg._reset_brand_registry_for_tests()
+
+        assert cfg.resolve_publish_platform("nmahya", "tiktok") == "upload_post_tiktok"
+
+    def test_falls_back_to_zernio(self, tmp_path, monkeypatch):
+        configs = tmp_path / "configs"
+        configs.mkdir()
+        self._write_brand(configs, "nmahya", {
+            "upload_post_tiktok": {"enabled": False},
+            "zernio_tiktok":      {"enabled": True, "account_id": "z1"},
+            "tiktok":             {"enabled": True},
+        })
+        monkeypatch.setenv("BRAND_CONFIGS_DIR", str(configs))
+        monkeypatch.setenv("DEFAULT_BRAND_ID", "nmahya")
+
+        from glitch_signal import config as cfg
+        cfg.settings.cache_clear()
+        cfg._reset_brand_registry_for_tests()
+
+        assert cfg.resolve_publish_platform("nmahya", "tiktok") == "zernio_tiktok"
+
+    def test_falls_back_to_direct(self, tmp_path, monkeypatch):
+        configs = tmp_path / "configs"
+        configs.mkdir()
+        self._write_brand(configs, "nmahya", {
+            "upload_post_tiktok": {"enabled": False},
+            "zernio_tiktok":      {"enabled": False},
+            "tiktok":             {"enabled": True},
+        })
+        monkeypatch.setenv("BRAND_CONFIGS_DIR", str(configs))
+        monkeypatch.setenv("DEFAULT_BRAND_ID", "nmahya")
+
+        from glitch_signal import config as cfg
+        cfg.settings.cache_clear()
+        cfg._reset_brand_registry_for_tests()
+
+        assert cfg.resolve_publish_platform("nmahya", "tiktok") == "tiktok"
+
+    def test_raises_when_nothing_enabled(self, tmp_path, monkeypatch):
+        configs = tmp_path / "configs"
+        configs.mkdir()
+        self._write_brand(configs, "nmahya", {
+            "tiktok":             {"enabled": False},
+            "upload_post_tiktok": {"enabled": False},
+        })
+        monkeypatch.setenv("BRAND_CONFIGS_DIR", str(configs))
+        monkeypatch.setenv("DEFAULT_BRAND_ID", "nmahya")
+
+        from glitch_signal import config as cfg
+        cfg.settings.cache_clear()
+        cfg._reset_brand_registry_for_tests()
+
+        with pytest.raises(RuntimeError, match="no enabled publisher"):
+            cfg.resolve_publish_platform("nmahya", "tiktok")
+
+
 class TestPublisherRoutesUploadPost:
     """publisher._publish_to_platform dispatches upload_post_* → platforms/upload_post."""
 

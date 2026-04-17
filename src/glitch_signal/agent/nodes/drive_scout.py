@@ -20,7 +20,7 @@ import structlog
 from sqlmodel import select
 
 from glitch_signal.agent.state import SignalAgentState
-from glitch_signal.config import brand_config, settings
+from glitch_signal.config import brand_config, resolve_publish_platform, settings
 from glitch_signal.db.models import Signal
 from glitch_signal.db.session import _session_factory
 from glitch_signal.integrations import google_drive
@@ -123,12 +123,29 @@ async def drive_scout_node(state: SignalAgentState) -> SignalAgentState:
     # keep it. Otherwise promote the first new signal so the downstream
     # nodes have something to process.
     first_new_id = new_signals[0]["id"] if new_signals else ""
+
+    # Resolve the publisher to use for this brand. Priority order (defined
+    # in glitch_signal.config._PUBLISH_PRIORITY):
+    #   upload_post_tiktok → zernio_tiktok → direct tiktok
+    # First one with `enabled=true` on the brand's platforms block wins.
+    # Explicit state["platform"] still overrides (manual test harness,
+    # specific re-runs).
+    try:
+        default_platform = resolve_publish_platform(brand_id, "tiktok")
+    except RuntimeError as exc:
+        log.warning(
+            "drive_scout.no_publisher_configured",
+            brand=brand_id,
+            error=str(exc)[:200],
+        )
+        default_platform = "tiktok"
+
     return {
         **state,
         "brand_id": brand_id,
         "signal_id": state.get("signal_id") or first_new_id,
         "signals": new_signals,
-        "platform": state.get("platform") or "tiktok",
+        "platform": state.get("platform") or default_platform,
     }
 
 
