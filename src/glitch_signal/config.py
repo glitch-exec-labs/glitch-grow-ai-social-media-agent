@@ -78,6 +78,19 @@ class Settings(BaseSettings):
     brand_configs_dir: str = "brand/configs"              # multi-brand dir
     default_brand_id: str = "glitch_executor"
 
+    # --- OAuth + token storage ---
+    # Generate: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+    auth_encryption_key: str = ""
+
+    # --- TikTok Content Posting API ---
+    tiktok_client_key: str = ""
+    tiktok_client_secret: str = ""
+    tiktok_redirect_uri: str = "https://grow.glitchexecutor.com/oauth/tiktok/callback"
+    tiktok_api_base: str = "https://open.tiktokapis.com"
+    tiktok_auth_base: str = "https://www.tiktok.com"
+    tiktok_default_scopes: str = "user.info.basic,video.upload,video.publish"
+    tiktok_post_status_timeout_s: int = 180
+
     # --- Retry windows (ms) ---
     publish_retry_1_ms: int = 1_800_000   # 30 min
     publish_retry_2_ms: int = 7_200_000   # 2 h
