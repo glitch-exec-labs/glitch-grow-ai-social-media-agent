@@ -125,6 +125,15 @@ class Settings(BaseSettings):
     upload_post_webhook_secret: str = ""
     upload_post_webhook_reconcile_after_s: int = 600   # 10 min
 
+    # --- Post-publish analytics pull cadence ---
+    # Upload-Post exposes per-post analytics. The scheduler's
+    # _pull_post_analytics tick writes a MetricsSnapshot every
+    # analytics_pull_interval_s once the post is at least
+    # analytics_first_pull_after_s old (so metrics have time to accrue).
+    analytics_first_pull_after_s: int = 3_600     # 1 hour
+    analytics_pull_interval_s: int = 86_400        # 24 hours
+    analytics_sweep_batch: int = 10
+
     # --- Media-serve public base URL ---
     # Zernio fetches videos from this host when posts are published via
     # the zernio_* publishers. An nginx location block on this hostname

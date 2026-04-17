@@ -443,6 +443,26 @@ Transforms available today:
 Add a transform: register a builder in `src/glitch_signal/media/ffmpeg.py`
 and list its name in the schema enum under `brand/schema/brand.config.schema.json`.
 
+---
+
+## Post-publish analytics
+
+Once a post goes live on an Upload-Post-backed platform, the scheduler
+starts collecting per-post metrics into `metrics_snapshot`:
+
+- First pull after `ANALYTICS_FIRST_PULL_AFTER_S` (default 1h) to let
+  metrics settle
+- Refresh every `ANALYTICS_PULL_INTERVAL_S` (default 24h); both the old
+  and new snapshots are preserved so deltas are visible
+- Up to `ANALYTICS_SWEEP_BATCH` posts per scheduler tick
+
+Fields are normalised to `{views, likes, comments, shares}` regardless
+of which platform posted (TikTok uses `play_count`, YouTube uses
+`video_views`, etc. — `analytics.upload_post.extract_metrics` coalesces).
+
+Zernio-backed and direct-TikTok posts aren't swept yet; their analytics
+modules are a future addition.
+
 ## ORM guardrails
 
 Hard-stop phrases trigger an **immediate Telegram alert and zero automated response** — no LLM involved, pure rule engine:
