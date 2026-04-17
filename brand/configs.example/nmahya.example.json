@@ -40,9 +40,17 @@
     "instagram": {"enabled": false},
     "tiktok": {
       "enabled": false,
-      "_comment_enabled": "Flipped to true by PR 3 once OAuth handshake completes and a refresh token lands in platform_auth.",
+      "_comment_enabled": "Direct-post — blocked for unaudited apps. Leave disabled until our TikTok audit clears; use upload_post_tiktok below as the default publisher.",
       "open_id": null,
       "daily_cap": 2,
+      "default_privacy_level": "PUBLIC_TO_EVERYONE",
+      "default_tags": ["ayurveda", "ayurvedalife", "nmahya"]
+    },
+    "upload_post_tiktok": {
+      "enabled": true,
+      "_comment": "DEFAULT. Upload-Post is an audited partner app — works today. Resolves via _PUBLISH_PRIORITY in config.py.",
+      "user": "Namhya",
+      "daily_cap": 5,
       "default_privacy_level": "PUBLIC_TO_EVERYONE",
       "default_tags": ["ayurveda", "ayurvedalife", "nmahya"]
     }

@@ -123,6 +123,7 @@ async def publish(
         caption=caption,
         title=title,
         extras=_platform_extras(target, cfg_block),
+        poll_timeout_s=s.upload_post_status_timeout_s,
     )
 
 
@@ -139,7 +140,9 @@ def _publish_sync(
     caption: str,
     title: str,
     extras: dict,
+    poll_timeout_s: int,
 ) -> tuple[str, str | None]:
+
     import upload_post
 
     client = upload_post.UploadPostClient(api_key=api_key)
@@ -149,22 +152,22 @@ def _publish_sync(
     # server through Python → their API. Upload-Post fetches directly.
     kwargs: dict = dict(
         video_path=video_url,
-        title=title or None,
         user=user,
         platforms=[target_platform],
     )
-    # Caption differs per platform. TikTok/IG accept `description` or the
-    # title field as body text. We put the full caption in `description` so
-    # hashtags render correctly on the platforms that need them.
+    # Title handling is platform-specific:
+    # - YouTube / Pinterest / LinkedIn: title is a real field (required or
+    #   strongly recommended). Pass it.
+    # - TikTok / Instagram / X / Threads / Bluesky: the platform has no
+    #   title concept, and Upload-Post prepends it to the caption body.
+    #   We want a clean caption → skip the title kwarg for these.
+    if title and target_platform in ("youtube", "pinterest", "linkedin"):
+        kwargs["title"] = title
     if caption:
         kwargs["description"] = caption
     kwargs.update(extras)
 
     resp = client.upload_video(**kwargs)
-
-    # Upload-Post returns a dict with success flag + per-platform status and
-    # a request_id used for status polling. Shape example:
-    #   {"success": True, "request_id": "...", "status": "queued", "results": {...}}
     if not resp.get("success", True):
         raise RuntimeError(f"Upload-Post upload_video failed: {resp}")
 
@@ -173,37 +176,109 @@ def _publish_sync(
         or (resp.get("results", {}) or {}).get("request_id")
         or str(uuid.uuid4())
     )
-    share_url = _extract_share_url(resp, target_platform)
+
+    # Upload-Post runs the actual publish asynchronously even when the SDK
+    # call returns. Poll get_status until the target platform completes
+    # (or times out), then extract the real TikTok/IG/etc. URL.
+    platform_post_id, share_url = _poll_until_done(
+        client, request_id, target_platform, poll_timeout_s
+    )
 
     log.info(
         "upload_post.publish.done",
         target=target_platform,
         user=user,
         request_id=request_id,
+        platform_post_id=platform_post_id,
         share_url=share_url,
     )
-    return request_id, share_url
+
+    # Store the real platform_post_id if we got one; otherwise fall back
+    # to the Upload-Post request_id (at least it's queryable later).
+    return platform_post_id or request_id, share_url
 
 
-def _extract_share_url(resp: dict, target_platform: str) -> str | None:
-    """Best-effort extraction of the published post URL from the SDK response.
+def _poll_until_done(
+    client, request_id: str, target_platform: str, timeout_s: int
+) -> tuple[str | None, str | None]:
+    """Poll Upload-Post get_status until the target platform finishes publishing.
 
-    Upload-Post's response shape varies by async/sync mode. Try a few paths
-    before giving up.
+    Returns (platform_post_id, share_url). Either may be None if:
+      - status poll timed out (publish may still complete later)
+      - Upload-Post's response doesn't include a per-platform result block
+
+    Upload-Post status shape (observed 2026-04-17):
+      {
+        "status": "completed",
+        "completed": 1, "total": 1,
+        "results": [
+          {
+            "platform": "tiktok",
+            "success": true,
+            "platform_post_id": "7629763358610574613",
+            "post_url": "https://www.tiktok.com/@.../video/7629763358610574613",
+            ...
+          }
+        ]
+      }
     """
-    # Sync publish response
-    results = resp.get("results") or {}
-    per_plat = results.get(target_platform) or {}
-    for key in ("url", "post_url", "share_url", "permalink"):
-        val = per_plat.get(key)
-        if val:
-            return str(val)
-    # Sometimes URL is at top-level
-    for key in ("url", "post_url", "share_url"):
-        val = resp.get(key)
-        if val:
-            return str(val)
-    return None
+    import time
+
+    interval = 3
+    elapsed = 0
+    last_status = None
+
+    while elapsed < timeout_s:
+        try:
+            st = client.get_status(request_id=request_id)
+        except Exception as exc:
+            log.warning(
+                "upload_post.status.poll_failed",
+                request_id=request_id,
+                error=str(exc)[:200],
+            )
+            time.sleep(interval)
+            elapsed += interval
+            continue
+
+        last_status = st
+        overall = str((st or {}).get("status", "")).lower()
+
+        # Find the result block for our target platform. get_status returns
+        # results as a list of dicts, one per platform in the original call.
+        results = (st or {}).get("results") or []
+        if isinstance(results, dict):
+            # Some SDK variants key by platform name instead of listing.
+            results = [{**(v or {}), "platform": k} for k, v in results.items()]
+
+        for r in results:
+            if not isinstance(r, dict):
+                continue
+            if r.get("platform") != target_platform:
+                continue
+            ppid = r.get("platform_post_id") or r.get("platformPostId")
+            url = r.get("post_url") or r.get("url") or r.get("share_url")
+            err = r.get("error_message") or r.get("errorMessage")
+            if err and not ppid:
+                raise RuntimeError(f"Upload-Post publish failed on {target_platform}: {err}")
+            if ppid or url:
+                return ppid, url
+
+        if overall in ("completed", "failed", "error"):
+            # Overall finished but we couldn't find our platform block —
+            # return what we have (None, None) so caller can fall back.
+            break
+
+        time.sleep(interval)
+        elapsed += interval
+
+    log.warning(
+        "upload_post.status.poll_timeout",
+        request_id=request_id,
+        target=target_platform,
+        last_status=last_status,
+    )
+    return None, None
 
 
 # ---------------------------------------------------------------------------

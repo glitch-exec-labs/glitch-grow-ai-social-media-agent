@@ -114,6 +114,7 @@ class Settings(BaseSettings):
     # Cheaper than Zernio at real volume. Platform keys: "upload_post_tiktok",
     # "upload_post_instagram", etc. See platforms/upload_post.py.
     upload_post_api_key: str = ""
+    upload_post_status_timeout_s: int = 180
 
     # --- Media-serve public base URL ---
     # Zernio fetches videos from this host when posts are published via
@@ -257,6 +258,46 @@ def brand_config(brand_id: str | None = None) -> dict:
             f"Unknown brand_id {key!r}. Configured brands: {sorted(registry.keys())}"
         )
     return registry[key]
+
+
+# Priority order for picking a publisher when a brand has multiple enabled.
+# Upload-Post is preferred — it's audited, cheap, and gives us access to
+# 10+ platforms under one integration. Zernio is the fallback (also
+# audited) if Upload-Post is disabled for a brand. Direct apps come last
+# because most aren't audited yet.
+_PUBLISH_PRIORITY = {
+    "tiktok":    ["upload_post_tiktok", "zernio_tiktok", "tiktok"],
+    "instagram": ["upload_post_instagram", "zernio_instagram", "instagram_reels"],
+    "youtube":   ["upload_post_youtube", "zernio_youtube", "youtube_shorts"],
+    "facebook":  ["upload_post_facebook", "zernio_facebook"],
+    "x":         ["upload_post_x", "zernio_twitter", "twitter"],
+    "threads":   ["upload_post_threads"],
+    "pinterest": ["upload_post_pinterest"],
+    "bluesky":   ["upload_post_bluesky"],
+    "reddit":    ["upload_post_reddit"],
+    "linkedin":  ["upload_post_linkedin"],
+}
+
+
+def resolve_publish_platform(brand_id: str, target: str = "tiktok") -> str:
+    """Return the platform key a brand should publish to for `target`.
+
+    Walks the priority list (Upload-Post first, then Zernio, then direct)
+    and returns the first key whose brand config has `enabled=true`.
+
+    Raises RuntimeError if nothing is enabled for this target.
+    """
+    cfg = brand_config(brand_id)
+    platforms = cfg.get("platforms", {}) or {}
+    priority = _PUBLISH_PRIORITY.get(target, [])
+    for key in priority:
+        block = platforms.get(key) or {}
+        if block.get("enabled"):
+            return key
+    raise RuntimeError(
+        f"Brand {brand_id!r} has no enabled publisher for target {target!r}. "
+        f"Checked: {priority}. Enable one in brand/configs/{brand_id}.json."
+    )
 
 
 def _reset_brand_registry_for_tests() -> None:
