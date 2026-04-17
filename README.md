@@ -127,7 +127,24 @@ curl http://127.0.0.1:3111/healthz
 
 ## Configuration
 
-### `.env` (from `.env.example`)
+### `.env` — the single secrets + credentials file
+
+Every third-party integration this agent talks to (LLM providers, video
+models, platform APIs, Telegram, Make.com automation, etc.) gets its
+credentials in `.env`. That file is **gitignored** (`.env` and `*.env`) and
+lives only on the deployed box. Operators copy `.env.example` → `.env`,
+fill in values, and restart the service. No sidecar secret files, no
+credentials in `brand/configs/`, no credentials in code.
+
+Layered config pattern:
+
+| File | Contains | In git |
+|---|---|---|
+| `.env` | Secrets, API tokens, infra endpoints | ❌ (gitignored) |
+| `brand/configs/<brand_id>.json` | Per-brand non-secret tunables (hashtags, guardrail lists, platform toggles) | ❌ (gitignored) |
+| `brand/schema/brand.config.schema.json` | Schema that validates brand configs | ✅ |
+| `brand/configs.example/*.example.json` | Templates showing config shape | ✅ |
+| `.env.example` | Template showing every env var the agent reads | ✅ |
 
 | Variable | Required | Description |
 |---|---|---|
@@ -141,6 +158,14 @@ curl http://127.0.0.1:3111/healthz
 | `GITHUB_TOKEN` | yes | GitHub API token for commit scanning |
 | `DISPATCH_MODE` | yes | `dry_run` (no external calls) or `live` |
 | `VIDEO_STORAGE_PATH` | yes | Directory for generated videos |
+| `MAKE_BASE_URL` | when Make.com is used | Zone-specific dashboard URL (default `https://us2.make.com`) |
+| `MAKE_API_BASE` | when Make.com is used | Zone-specific API base (default `https://us2.make.com/api/v2`) |
+| `MAKE_ORG_ID` | when Make.com is used | Make.com organisation ID |
+| `MAKE_API_TOKEN` | when Make.com is used | Make.com API token — zone-bound, keep secret |
+
+Zone note: Make.com tokens are **zone-bound** (us1 / us2 / eu1 / eu2). A
+token issued on `us2` will be rejected by `us1`. If the org moves zones,
+both `MAKE_BASE_URL` and `MAKE_API_TOKEN` must be rotated together.
 
 ### Brand configs — multi-brand, per-file
 
