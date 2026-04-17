@@ -8,10 +8,11 @@ from typing_extensions import TypedDict
 class SignalAgentState(TypedDict, total=False):
     # --- Brand (threaded through every node) ---
     brand_id: str               # key into settings().brands; defaults to default_brand_id
+    content_source: str         # ai_generated | drive_footage — drives graph entry
 
     # --- Input / Scout ---
     signal_id: str
-    platform: str               # youtube_shorts | twitter | instagram_reels
+    platform: str               # youtube_shorts | twitter | instagram_reels | tiktok
     signals: list[dict]         # list of discovered Signal dicts from Scout
 
     # --- ScriptWriter ---

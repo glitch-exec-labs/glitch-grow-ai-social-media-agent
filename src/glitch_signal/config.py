@@ -73,6 +73,11 @@ class Settings(BaseSettings):
     github_org: str = "glitch-exec-labs"
     github_repos: str = ""  # csv of repo names; empty = all org repos
 
+    # --- Google Drive (drive_footage content source) ---
+    # Service-account JSON path. SA email must have Viewer on each brand's
+    # Drive folder. Empty = drive_scout is disabled.
+    google_drive_sa_json: str = ""
+
     # --- Brand ---
     brand_config_path: str = "brand.config.json"          # legacy single-file (still supported)
     brand_configs_dir: str = "brand/configs"              # multi-brand dir
