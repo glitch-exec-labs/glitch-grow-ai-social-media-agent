@@ -31,8 +31,42 @@ log = structlog.get_logger(__name__)
 _INIT_PATH = "/v2/post/publish/video/init/"
 _STATUS_PATH = "/v2/post/publish/status/fetch/"
 
-_CHUNK_SIZE = 10 * 1024 * 1024   # 10 MB — within TikTok per-chunk limits
-_MIN_CHUNK_SIZE = 5 * 1024 * 1024
+_CHUNK_SIZE = 10 * 1024 * 1024        # 10 MB — target chunk size
+_MIN_CHUNK_SIZE = 5 * 1024 * 1024     # 5 MB  — TikTok per-chunk floor
+_MAX_CHUNK_SIZE = 64 * 1024 * 1024    # 64 MB — TikTok per-chunk ceiling
+# If the whole file is ≤ this, TikTok wants a single-chunk upload.
+_SINGLE_CHUNK_MAX = 64 * 1024 * 1024
+
+
+def _plan_chunks(file_size: int) -> tuple[int, int]:
+    """Return (chunk_size, total_chunk_count) matching TikTok's rules.
+
+    TikTok Content Posting API constraints (2026-04):
+      - Each chunk except the LAST must equal chunk_size exactly.
+      - Every chunk (including the last) must be in [5 MB, 64 MB] unless
+        total_chunk_count == 1 (single-shot upload).
+      - For files ≤ 64 MB use a single chunk of file_size bytes.
+
+    For multi-chunk files we floor-divide to leave the remainder rolled
+    into the final chunk, guaranteeing chunk_last ≥ chunk_size ≥ 5 MB.
+    """
+    if file_size <= _SINGLE_CHUNK_MAX:
+        return file_size, 1
+
+    chunk_size = _CHUNK_SIZE
+    # Floor-divide so the remainder accumulates onto the final chunk
+    # instead of becoming a too-small standalone chunk.
+    total_chunk_count = max(1, file_size // chunk_size)
+
+    # Pathological case: if the final chunk would exceed the 64 MB ceiling,
+    # grow chunk_size until it fits. Only matters for files above ~640 MB
+    # with a pathological modulo, and TikTok caps video uploads well below
+    # the level where we'd need to worry — but belt-and-braces.
+    while (file_size - chunk_size * (total_chunk_count - 1)) > _MAX_CHUNK_SIZE:
+        chunk_size += _CHUNK_SIZE
+        total_chunk_count = max(1, file_size // chunk_size)
+
+    return chunk_size, total_chunk_count
 
 
 async def publish(
@@ -108,8 +142,7 @@ async def _init_upload(
     cfg: dict,
 ) -> dict:
     s = settings()
-    chunk_size = min(_CHUNK_SIZE, max(_MIN_CHUNK_SIZE, file_size))
-    total_chunk_count = max(1, (file_size + chunk_size - 1) // chunk_size)
+    chunk_size, total_chunk_count = _plan_chunks(file_size)
 
     body = {
         "post_info": {
@@ -148,10 +181,10 @@ async def _init_upload(
 
 
 async def _upload_file(upload_url: str, path: pathlib.Path, file_size: int) -> None:
-    chunk_size = min(_CHUNK_SIZE, max(_MIN_CHUNK_SIZE, file_size))
+    chunk_size, total_chunk_count = _plan_chunks(file_size)
 
     async with httpx.AsyncClient(timeout=600) as client:
-        if file_size <= chunk_size:
+        if total_chunk_count == 1:
             # Single-shot upload.
             with path.open("rb") as f:
                 data = f.read()
@@ -169,13 +202,19 @@ async def _upload_file(upload_url: str, path: pathlib.Path, file_size: int) -> N
                 raise RuntimeError(f"TikTok upload failed: HTTP {resp.status_code}")
             return
 
-        # Chunked upload — TikTok expects sequential PUTs at byte ranges.
+        # Chunked upload — send exactly total_chunk_count chunks. Every
+        # chunk except the last is exactly chunk_size bytes. The final
+        # chunk absorbs any remainder, so it's ≥ chunk_size ≥ 5 MB.
         with path.open("rb") as f:
-            offset = 0
-            while offset < file_size:
-                chunk = f.read(chunk_size)
+            for i in range(total_chunk_count):
+                if i == total_chunk_count - 1:
+                    # Final chunk — take whatever is left.
+                    chunk = f.read()
+                else:
+                    chunk = f.read(chunk_size)
                 if not chunk:
                     break
+                offset = i * chunk_size
                 end = offset + len(chunk) - 1
                 resp = await client.put(
                     upload_url,
@@ -196,7 +235,6 @@ async def _upload_file(upload_url: str, path: pathlib.Path, file_size: int) -> N
                     raise RuntimeError(
                         f"TikTok chunk upload failed at offset={offset}: HTTP {resp.status_code}"
                     )
-                offset += len(chunk)
 
 
 async def _poll_until_published(access_token: str, publish_id: str) -> str | None:
