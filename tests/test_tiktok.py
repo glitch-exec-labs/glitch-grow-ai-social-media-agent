@@ -104,6 +104,57 @@ class TestTikTokOAuth:
 # TikTok publisher
 # ---------------------------------------------------------------------------
 
+class TestPlanChunks:
+    """Chunk planner must satisfy TikTok's per-chunk size rules.
+
+    Rules (Content Posting API, 2026-04):
+      - Files ≤ 64 MB → single chunk of file_size bytes.
+      - Multi-chunk: every chunk except the last equals chunk_size,
+        and every chunk must be in [5 MB, 64 MB].
+    """
+    MB = 1024 * 1024
+
+    def test_single_chunk_under_64mb(self):
+        from glitch_signal.platforms.tiktok import _plan_chunks
+        cs, n = _plan_chunks(10 * self.MB)
+        assert n == 1
+        assert cs == 10 * self.MB
+
+    def test_single_chunk_exactly_64mb(self):
+        from glitch_signal.platforms.tiktok import _plan_chunks
+        cs, n = _plan_chunks(64 * self.MB)
+        assert n == 1
+        assert cs == 64 * self.MB
+
+    def test_82mb_uses_8_chunks_with_larger_final(self):
+        # The real-world bug: 82.7 MB / 10 MB chunks yielded 9 chunks with
+        # a 2.66 MB final chunk (< 5 MB floor). Correct plan: 8 chunks,
+        # chunk_size 10 MB, final chunk = file_size - 7*10 MB = 12.66 MB.
+        from glitch_signal.platforms.tiktok import _plan_chunks
+        file_size = 86683219   # 82.7 MB — the Namhya file
+        cs, n = _plan_chunks(file_size)
+        assert n == 8
+        assert cs == 10 * self.MB
+        final = file_size - cs * (n - 1)
+        assert 5 * self.MB <= final <= 64 * self.MB
+
+    def test_final_chunk_always_between_5_and_64_mb(self):
+        # Exhaustive sanity: any file size between 64 MB (exclusive) and
+        # 640 MB (past any realistic video) must plan to a valid final chunk.
+        from glitch_signal.platforms.tiktok import _plan_chunks
+        for fs_mb in range(65, 640, 3):
+            fs = fs_mb * self.MB
+            cs, n = _plan_chunks(fs)
+            if n == 1:
+                assert cs == fs
+            else:
+                final = fs - cs * (n - 1)
+                assert 5 * self.MB <= final <= 64 * self.MB, (
+                    f"file_size={fs_mb}MB plan=({cs//self.MB}MB × {n}) "
+                    f"→ final={final/self.MB:.2f}MB out of range"
+                )
+
+
 class TestTikTokPublisher:
     @pytest.mark.asyncio
     async def test_dry_run_returns_fake_id_and_no_http(self):
