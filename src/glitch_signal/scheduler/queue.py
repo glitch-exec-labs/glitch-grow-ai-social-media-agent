@@ -73,8 +73,20 @@ async def _tick() -> None:
         _sweep_stuck(),
         _poll_orm_mentions(),
         _reconcile_awaiting_webhook(),
+        _pull_post_analytics(),
         return_exceptions=True,
     )
+
+
+async def _pull_post_analytics() -> None:
+    """Fetch per-post analytics from Upload-Post for due PublishedPost rows."""
+    try:
+        from glitch_signal.analytics.upload_post import sweep_due_posts
+        updated = await sweep_due_posts(limit=settings().analytics_sweep_batch)
+        if updated:
+            log.info("scheduler.analytics_swept", count=len(updated))
+    except Exception as exc:
+        log.warning("scheduler.analytics_sweep_error", error=str(exc)[:200])
 
 
 # ---------------------------------------------------------------------------
