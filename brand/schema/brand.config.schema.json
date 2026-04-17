@@ -25,6 +25,10 @@
       "default": "ai_generated",
       "description": "ai_generated = Kling/Runway pipeline. drive_footage = pre-edited clips from a Drive folder (Nmahya-style)."
     },
+    "drive_folder_id": {
+      "type": ["string", "null"],
+      "description": "Google Drive folder ID. Required when content_source=drive_footage. The GOOGLE_DRIVE_SA_JSON service-account email must have Viewer on this folder."
+    },
     "brand": {
       "type": "object",
       "description": "Visual + voice identity used by the video assembler and script writer.",

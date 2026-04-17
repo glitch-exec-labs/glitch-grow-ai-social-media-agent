@@ -3,6 +3,7 @@
   "display_name": "Nmahya Ayurveda",
   "timezone": "Asia/Kolkata",
   "content_source": "drive_footage",
+  "drive_folder_id": "<FILL WITH NMAHYA DRIVE FOLDER ID>",
   "brand": {
     "name": "Nmahya Ayurveda",
     "accent_color": "#7a5c2e",

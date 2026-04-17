@@ -127,6 +127,50 @@ async def job_assemble(script_id: str) -> dict:
     return {"ok": True, "script_id": script_id}
 
 
+@app.post("/jobs/drive_scout")
+async def job_drive_scout(request: Request, brand: str) -> dict:
+    """Trigger the drive_footage pipeline for a brand.
+
+    Reads the brand's drive_folder_id from config, discovers new video files,
+    downloads them, and runs drive_scout → caption_writer → telegram_preview
+    for the first new signal. Returns immediately after dispatching.
+    """
+    from glitch_signal.config import brand_config, brand_ids
+
+    if brand not in brand_ids():
+        raise HTTPException(status_code=400, detail=f"Unknown brand: {brand!r}")
+
+    cfg = brand_config(brand)
+    if cfg.get("content_source") != "drive_footage":
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Brand {brand!r} content_source is {cfg.get('content_source')!r}; "
+                "drive_scout only runs for brands with content_source=drive_footage"
+            ),
+        )
+
+    body: dict = {}
+    try:
+        body = await request.json()
+    except Exception:
+        pass
+
+    state = {
+        "brand_id": brand,
+        "content_source": "drive_footage",
+        "signal_id": body.get("signal_id", ""),
+        "platform": body.get("platform", "tiktok"),
+        "retry_count": 0,
+    }
+    asyncio.create_task(_graph.ainvoke(state))
+    return {
+        "ok": True,
+        "brand": brand,
+        "message": "drive_scout dispatched in background",
+    }
+
+
 # ---------------------------------------------------------------------------
 # Telegram webhook
 # ---------------------------------------------------------------------------

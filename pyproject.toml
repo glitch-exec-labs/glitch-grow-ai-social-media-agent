@@ -57,13 +57,19 @@ dependencies = [
   "tenacity>=9.0",
   "aiofiles>=24.1",
   "cryptography>=43.0",
+
+  # Google APIs (Drive for drive_footage content source; YouTube Data for
+  # uploads — moved from phase2 into core because the drive_footage path
+  # needs google-api-python-client at boot)
+  "google-api-python-client>=2.150",
+  "google-auth>=2.35",
+  "google-auth-httplib2>=0.2",
 ]
 
 [project.optional-dependencies]
 phase2 = [
   "tweepy>=4.14",
   "google-auth-oauthlib>=1.2",
-  "google-api-python-client>=2.150",
 ]
 dev = [
   "pytest>=8.3",

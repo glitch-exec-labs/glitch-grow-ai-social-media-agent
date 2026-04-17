@@ -1,14 +1,20 @@
 """LangGraph StateGraph for the Glitch Social Media Agent video pipeline.
 
-Graph flow:
-  scout → script_writer → storyboard → video_router → video_generator → END
-                                                                         ↑
-  video_assembler → quality_check → [pass] → telegram_preview → END
-                                  → [retry] → storyboard (retry_count < 2)
-                                  → [escalate] → END (Telegram alert sent)
+Two entry paths, chosen per-invocation via `state["content_source"]`:
 
-The video_generator node dispatches shots to video model APIs and returns.
-The scheduler re-invokes from video_assembler when all shots complete.
+  ai_generated (default, Glitch Executor):
+    scout → script_writer → storyboard → video_router → video_generator → END
+    [scheduler re-enters at video_assembler when all shots complete]
+    video_assembler → quality_check → [pass]     → telegram_preview → END
+                                    → [retry]    → storyboard (retry_count < 2)
+                                    → [escalate] → END (Telegram alert sent)
+
+  drive_footage (Namhya-style — pre-edited clips from a Drive folder):
+    drive_scout → caption_writer → telegram_preview → END
+    [video generation + QC are bypassed — footage is post-ready]
+
+If content_source is absent, routing defaults to ai_generated so existing
+/jobs/scout callers behave exactly as before this PR.
 """
 from __future__ import annotations
 
@@ -23,6 +29,8 @@ from glitch_signal.agent.nodes.video_generator import video_generator_node
 from glitch_signal.agent.nodes.video_assembler import video_assembler_node
 from glitch_signal.agent.nodes.quality_check import quality_check_node
 from glitch_signal.agent.nodes.telegram_preview import telegram_preview_node
+from glitch_signal.agent.nodes.drive_scout import drive_scout_node
+from glitch_signal.agent.nodes.caption_writer import caption_writer_node
 
 
 MAX_QC_RETRIES = 2
@@ -67,11 +75,17 @@ async def _escalate_node(state: SignalAgentState) -> SignalAgentState:
     return {**state, "error": f"QC failed after {MAX_QC_RETRIES} retries: {qc_notes}"}
 
 
+def _entry_router(state: SignalAgentState) -> str:
+    """Pick the entry node based on content_source."""
+    cs = (state.get("content_source") or "").strip().lower()
+    return "drive_scout" if cs == "drive_footage" else "scout"
+
+
 def build_graph() -> StateGraph:
     """Build and compile the full pipeline graph."""
     graph = StateGraph(SignalAgentState)
 
-    # Register all nodes
+    # ai_generated branch (existing Glitch Executor pipeline)
     graph.add_node("scout", scout_node)
     graph.add_node("script_writer", script_writer_node)
     graph.add_node("storyboard", storyboard_node)
@@ -82,16 +96,28 @@ def build_graph() -> StateGraph:
     graph.add_node("telegram_preview", telegram_preview_node)
     graph.add_node("escalate", _escalate_node)
 
-    # Phase 1 pipeline: scout → ... → video_generator → END
-    # (scheduler re-enters at video_assembler when shots complete)
-    graph.set_entry_point("scout")
+    # drive_footage branch (Namhya-style)
+    graph.add_node("drive_scout", drive_scout_node)
+    graph.add_node("caption_writer", caption_writer_node)
+
+    # Conditional entry — drive_footage brands skip the whole AI chain.
+    graph.set_conditional_entry_point(
+        _entry_router,
+        {"scout": "scout", "drive_scout": "drive_scout"},
+    )
+
+    # ai_generated path
     graph.add_edge("scout", "script_writer")
     graph.add_edge("script_writer", "storyboard")
     graph.add_edge("storyboard", "video_router")
     graph.add_edge("video_router", "video_generator")
     graph.add_edge("video_generator", END)
 
-    # Assembler branch (scheduler-triggered re-entry)
+    # drive_footage path — no video gen, no assembler, no QC
+    graph.add_edge("drive_scout", "caption_writer")
+    graph.add_edge("caption_writer", "telegram_preview")
+
+    # Assembler branch (scheduler-triggered re-entry for ai_generated)
     graph.add_edge("video_assembler", "quality_check")
     graph.add_conditional_edges(
         "quality_check",
