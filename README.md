@@ -754,7 +754,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for the full guide.
 
 ## License
 
-Business Source License 1.1 — see [LICENSE](LICENSE). Converts to Apache 2.0 on 2030-04-18. Production use is permitted except for offering the software as a competing hosted/embedded product. For commercial licensing, contact licensing@glitchexecutor.com.
+Business Source License 1.1 — see [LICENSE](LICENSE). Converts to Apache 2.0 on 2030-04-18. Production use is permitted except for offering the software as a competing hosted/embedded product. For commercial licensing, contact support@glitchexecutor.com.
 
 Brand configs (voice prompts, guardrail lists, watermark assets, Drive folder IDs) are private and not included in this repository.
 
