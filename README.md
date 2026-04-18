@@ -10,7 +10,7 @@
     <img src="https://github.com/glitch-exec-labs/glitch-social-media-agent/actions/workflows/ci.yml/badge.svg" alt="CI">
   </a>
   <img src="https://img.shields.io/badge/python-3.11%2B-blue" alt="Python 3.11+">
-  <img src="https://img.shields.io/badge/license-MIT-green" alt="MIT License">
+  <img src="https://img.shields.io/badge/license-BSL%201.1-blue" alt="BSL 1.1">
   <img src="https://img.shields.io/badge/dispatch-dry__run%20%7C%20live-orange" alt="Dispatch Mode">
   <img src="https://img.shields.io/badge/tests-81%20passing-brightgreen" alt="81 tests">
 </p>
@@ -754,7 +754,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for the full guide.
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+Business Source License 1.1 — see [LICENSE](LICENSE). Converts to Apache 2.0 on 2030-04-18. Production use is permitted except for offering the software as a competing hosted/embedded product. For commercial licensing, contact licensing@glitchexecutor.com.
 
 Brand configs (voice prompts, guardrail lists, watermark assets, Drive folder IDs) are private and not included in this repository.
 
