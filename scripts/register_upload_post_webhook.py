@@ -27,8 +27,6 @@ from __future__ import annotations
 import os
 import sys
 
-import requests
-
 
 def main() -> int:
     api_key = os.environ.get("UPLOAD_POST_API_KEY", "").strip()
@@ -56,33 +54,41 @@ def main() -> int:
         "social_account_reauth_required",
     ]
 
-    print(f"Registering webhook: {webhook_url}")
+    # Redact the secret from console output so the registration flow can be
+    # pasted into logs / Slack / Telegram without leaking the URL path.
+    redacted = webhook_url.replace(secret, "***SECRET***")
+    print(f"Registering webhook: {redacted}")
     print(f"Events: {', '.join(events)}")
 
-    # Per https://docs.upload-post.com/api/webhooks/
-    resp = requests.post(
-        "https://app.upload-post.com/api/uploadposts/users/notifications",
-        headers={
-            "Authorization": f"Apikey {api_key}",
-            "Content-Type": "application/json",
-        },
-        json={
-            "channels": ["webhook"],
-            "webhook_url": webhook_url,
-            "webhook_events": events,
-        },
-        timeout=30,
-    )
+    # Upload-Post's real webhook config endpoint is
+    # POST api.upload-post.com/api/uploadposts/users/notifications.
+    # The SDK's `update_notification_config` method POSTs to
+    # /uploadposts/notification-config which 404s (stale SDK path).
+    # We call the correct endpoint directly. Verified 2026-04-18:
+    # GET returns `{"success":true,"notifications":{}}` on a fresh account.
+    import requests
 
-    print(f"HTTP {resp.status_code}")
     try:
-        print(resp.json())
-    except Exception:
-        print(resp.text)
-
-    if resp.status_code >= 400:
+        resp = requests.post(
+            "https://api.upload-post.com/api/uploadposts/users/notifications",
+            headers={
+                "Authorization": f"Apikey {api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "webhook_url": webhook_url,
+                "webhook_events": events,
+            },
+            timeout=30,
+        )
+    except requests.RequestException as exc:
+        print(f"ERROR: HTTP request failed: {exc}", file=sys.stderr)
         return 1
-    return 0
+
+    body = resp.text.replace(secret, "***SECRET***")
+    print(f"HTTP {resp.status_code}")
+    print(body)
+    return 0 if resp.status_code < 400 else 1
 
 
 if __name__ == "__main__":
