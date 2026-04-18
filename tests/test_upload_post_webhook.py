@@ -523,6 +523,85 @@ class TestReconciliationSweep:
             _restore(originals)
 
     @pytest.mark.asyncio
+    async def test_sweep_updates_sheet_row_to_posted(self, monkeypatch):
+        """Regression for 2026-04-18: reconciliation wrote PublishedPost
+        but forgot to flip the brand's Google Sheet row from `captioned`
+        to `posted`. 11 Namhya posts went live but sheet stayed stale."""
+        from datetime import timedelta
+
+        from glitch_signal import config as cfg
+        from glitch_signal.db.models import (
+            ContentScript,
+            ScheduledPost,
+            Signal,
+            VideoAsset,
+        )
+        from glitch_signal.scheduler import queue as q
+
+        monkeypatch.setenv("UPLOAD_POST_API_KEY", "k")
+        monkeypatch.setenv("UPLOAD_POST_WEBHOOK_RECONCILE_AFTER_S", "60")
+        cfg.settings.cache_clear()
+
+        factory, originals = await _build_test_db()
+        try:
+            now = datetime.now(UTC).replace(tzinfo=None)
+            sig_id = str(uuid.uuid4())
+            cs_id = str(uuid.uuid4())
+            asset_id = str(uuid.uuid4())
+            sp_id = str(uuid.uuid4())
+            async with factory() as session:
+                session.add(Signal(
+                    id=sig_id, brand_id="drive_brand", source="drive",
+                    source_ref="FID1",
+                    summary="Drive clip: Liver_ad15.mp4",
+                    novelty_score=1.0, status="scripted", created_at=now,
+                ))
+                session.add(ContentScript(
+                    id=cs_id, brand_id="drive_brand", signal_id=sig_id,
+                    platform="tiktok", script_body="", content_type="drive",
+                    status="done", created_at=now,
+                ))
+                session.add(VideoAsset(
+                    id=asset_id, brand_id="drive_brand", script_id=cs_id,
+                    file_path="/tmp/x.mp4", duration_s=1.0, created_at=now,
+                ))
+                session.add(ScheduledPost(
+                    id=sp_id, brand_id="drive_brand", asset_id=asset_id,
+                    platform="upload_post_tiktok", scheduled_for=now,
+                    status="awaiting_webhook", attempts=1,
+                    vendor_request_id="req-abc",
+                    last_attempt_at=now - timedelta(minutes=30),
+                ))
+                await session.commit()
+
+            async def fake_poll(req_id, target):
+                return "TT-POST-1", "https://tiktok.com/x/video/1"
+            monkeypatch.setattr(
+                "glitch_signal.platforms.upload_post.poll_status_for_request",
+                fake_poll,
+            )
+
+            captured_sheet = {}
+            async def fake_update(brand_id, video_name, updates):
+                captured_sheet["brand_id"] = brand_id
+                captured_sheet["video_name"] = video_name
+                captured_sheet["updates"] = updates
+                return True
+            monkeypatch.setattr(
+                "glitch_signal.integrations.sheet_tracker.update_by_video_name",
+                fake_update,
+            )
+
+            await q._reconcile_awaiting_webhook()
+
+            assert captured_sheet["brand_id"] == "drive_brand"
+            assert captured_sheet["video_name"] == "Liver_ad15.mp4"
+            assert captured_sheet["updates"]["status"] == "posted"
+            assert captured_sheet["updates"]["tiktok_url"] == "https://tiktok.com/x/video/1"
+        finally:
+            _restore(originals)
+
+    @pytest.mark.asyncio
     async def test_sweep_skips_rows_inside_reconcile_window(self, monkeypatch):
         from datetime import timedelta
 

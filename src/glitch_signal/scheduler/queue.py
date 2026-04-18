@@ -568,33 +568,60 @@ def _in_any_slot(local_now: datetime, slots: list[str], *, tolerance_minutes: in
 
 
 async def _count_posts_today(brand_id: str, now: datetime) -> int:
-    from glitch_signal.db.models import PublishedPost
+    """Count posts already fired today — both finalised AND in-flight.
+
+    Upload-Post is webhook-async: a dispatch claims a ScheduledPost and
+    marks it `awaiting_webhook`, but the matching PublishedPost row isn't
+    written until the webhook (or the 10-min reconciliation fallback)
+    finalises. A naive count of just `PublishedPost` makes the daily_cap
+    gate blind during that window and the dispatcher re-fires every 30s
+    tick until the slot closes — observed 2026-04-18 as 11 posts fired
+    inside a single 15-min slot when cap was 3.
+
+    We count any ScheduledPost that has entered the publish pipeline
+    today (dispatching, awaiting_webhook, done) PLUS PublishedPost
+    timestamps — covers both the async and sync paths without
+    double-counting (we look at distinct scheduled_post ids implicitly).
+    """
+    from glitch_signal.db.models import ScheduledPost
     day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     factory = _session_factory()
     async with factory() as session:
         result = await session.execute(
-            select(PublishedPost).where(
-                PublishedPost.brand_id == brand_id,
-                PublishedPost.published_at >= day_start,
+            select(ScheduledPost).where(
+                ScheduledPost.brand_id == brand_id,
+                ScheduledPost.status.in_(("dispatching", "awaiting_webhook", "done")),
+                ScheduledPost.last_attempt_at >= day_start,
             )
         )
         return len(result.scalars().all())
 
 
 async def _minutes_since_last_post(brand_id: str, now: datetime) -> float | None:
-    from glitch_signal.db.models import PublishedPost
+    """Return minutes since the most recent dispatch for this brand.
+
+    Uses ScheduledPost.last_attempt_at rather than PublishedPost.published_at
+    so the min_interval gate is honoured *during* the async webhook window,
+    not just after it. See the docstring on `_count_posts_today` for the
+    rationale (same failure mode observed on 2026-04-18).
+    """
+    from glitch_signal.db.models import ScheduledPost
     factory = _session_factory()
     async with factory() as session:
         result = await session.execute(
-            select(PublishedPost)
-            .where(PublishedPost.brand_id == brand_id)
-            .order_by(PublishedPost.published_at.desc())
+            select(ScheduledPost)
+            .where(
+                ScheduledPost.brand_id == brand_id,
+                ScheduledPost.status.in_(("dispatching", "awaiting_webhook", "done")),
+                ScheduledPost.last_attempt_at.is_not(None),
+            )
+            .order_by(ScheduledPost.last_attempt_at.desc())
             .limit(1)
         )
         latest = result.scalar_one_or_none()
-    if latest is None or latest.published_at is None:
+    if latest is None or latest.last_attempt_at is None:
         return None
-    return (now - latest.published_at).total_seconds() / 60.0
+    return (now - latest.last_attempt_at).total_seconds() / 60.0
 
 
 async def _recent_brand_post_keys(
@@ -780,12 +807,48 @@ async def _reconcile_awaiting_webhook() -> None:
             session.add(pub)
             session.add(s_row)
             await session.commit()
-            log.info(
-                "scheduler.reconcile_awaiting_webhook_finalized",
-                scheduled_post_id=sp.id,
-                platform_post_id=pub.platform_post_id,
-                via="get_status",
+
+            # Resolve drive filename for sheet key BEFORE the session closes.
+            video_name = await _resolve_drive_filename(session, s_row.asset_id)
+
+        # Flip the brand's sheet row to `posted` (same update the webhook
+        # handler does — reconciliation previously skipped this, leaving
+        # rows stuck on `captioned` even though the TikTok post was live).
+        if video_name:
+            from glitch_signal.integrations import sheet_tracker
+            await sheet_tracker.update_by_video_name(
+                s_row.brand_id,
+                video_name,
+                {
+                    "status":     "posted",
+                    "posted_at":  pub.published_at.isoformat(timespec="seconds"),
+                    "tiktok_url": url or "",
+                },
             )
+
+        log.info(
+            "scheduler.reconcile_awaiting_webhook_finalized",
+            scheduled_post_id=sp.id,
+            platform_post_id=pub.platform_post_id,
+            via="get_status",
+        )
+
+
+async def _resolve_drive_filename(session, asset_id: str | None) -> str | None:
+    """Walk asset → script → signal to find the Drive filename for a sheet key."""
+    if not asset_id:
+        return None
+    from glitch_signal.db.models import ContentScript, Signal, VideoAsset
+    asset = await session.get(VideoAsset, asset_id)
+    if not asset or not asset.script_id:
+        return None
+    cs = await session.get(ContentScript, asset.script_id)
+    if not cs or not cs.signal_id:
+        return None
+    sig = await session.get(Signal, cs.signal_id)
+    if not sig or sig.source != "drive":
+        return None
+    return sig.summary.replace("Drive clip: ", "", 1)
 
 
 # ---------------------------------------------------------------------------
