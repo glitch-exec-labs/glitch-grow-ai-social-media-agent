@@ -29,6 +29,9 @@ brand/configs/*.json
 !brand/configs/.gitkeep
 brand/prompts/*.md
 !brand/prompts/.gitkeep
+brand/audio/*
+!brand/audio/.gitkeep
+!brand/audio/README.md
 
 # Generated videos — large binary files
 /var/lib/glitch-signal/
