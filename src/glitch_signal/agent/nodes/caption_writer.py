@@ -90,9 +90,33 @@ async def caption_writer_node(state: SignalAgentState) -> SignalAgentState:
         # to the conventional location.
         local_path = _resolve_local_path(state, signal, brand_id)
 
-        title, caption, hashtags = await _generate_caption(
-            signal, brand_id, platform, local_path=local_path
-        )
+        # Prefer a human-written caption from the brand's tracker sheet when
+        # present. Operators often pre-write captions in the `caption` column
+        # alongside the video row — that hand-authored text should win over
+        # LLM output. Fall through to LLM generation when the sheet has no
+        # caption (or no sheet is configured).
+        sheet_caption = await _read_sheet_caption(brand_id, signal)
+        if sheet_caption:
+            caption = sheet_caption
+            # Derive a title the same way _read_caption does for publishing,
+            # and harvest hashtags from the caption body.
+            first = caption.split(".")[0][:100].strip()
+            title = first or caption[:100].strip()
+            hashtags = [
+                tok[1:].rstrip(".,!?").lower()
+                for tok in caption.split()
+                if tok.startswith("#") and len(tok) > 1
+            ]
+            log.info(
+                "caption_writer.used_sheet_caption",
+                brand_id=brand_id,
+                signal_id=signal_id,
+                caption_preview=caption[:80],
+            )
+        else:
+            title, caption, hashtags = await _generate_caption(
+                signal, brand_id, platform, local_path=local_path
+            )
 
         script_id = str(uuid.uuid4())
         asset_id = str(uuid.uuid4())
@@ -128,15 +152,16 @@ async def caption_writer_node(state: SignalAgentState) -> SignalAgentState:
         await session.commit()
 
     # Push caption + "captioned" status to the brand's tracker sheet
-    # (no-op when no sheet is configured on the brand).
+    # (no-op when no sheet is configured on the brand). When the caption
+    # came FROM the sheet, we only bump status — we never clobber a human
+    # caption with the same string we just read.
     from glitch_signal.integrations import sheet_tracker
     if signal.source == "drive":
         video_name = signal.summary.replace("Drive clip: ", "", 1)
-        await sheet_tracker.update_by_video_name(
-            brand_id,
-            video_name,
-            {"caption": caption, "status": "captioned"},
-        )
+        updates: dict = {"status": "captioned"}
+        if not sheet_caption:
+            updates["caption"] = caption
+        await sheet_tracker.update_by_video_name(brand_id, video_name, updates)
 
     log.info(
         "caption_writer.done",
@@ -158,6 +183,32 @@ async def caption_writer_node(state: SignalAgentState) -> SignalAgentState:
         "asset_id": asset_id,
         "asset_path": str(local_path),
     }
+
+
+async def _read_sheet_caption(brand_id: str, signal: Signal) -> str | None:
+    """Return a pre-written caption from the brand's tracker sheet, or None.
+
+    Only applicable to drive-source signals — we key on the Drive filename.
+    Returns None when the sheet isn't configured, the row is missing, or the
+    `caption` cell is blank. Failures never raise — caption generation is
+    the fallback.
+    """
+    if signal.source != "drive":
+        return None
+    try:
+        from glitch_signal.integrations import sheet_tracker
+        video_name = signal.summary.replace("Drive clip: ", "", 1)
+        row = await sheet_tracker.read_by_video_name(brand_id, video_name)
+    except Exception as exc:
+        log.warning(
+            "caption_writer.sheet_read_failed",
+            brand_id=brand_id, signal_id=signal.id, error=str(exc)[:200],
+        )
+        return None
+    if not row:
+        return None
+    caption = (row.get("caption") or "").strip()
+    return caption or None
 
 
 async def _generate_caption(

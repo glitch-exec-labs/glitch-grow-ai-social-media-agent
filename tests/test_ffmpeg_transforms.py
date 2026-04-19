@@ -119,7 +119,7 @@ class TestStripAudioBuilder:
         from glitch_signal.media.ffmpeg import _strip_audio
         src = tmp_path / "in.mp4"
         dst = tmp_path / "in.strip_audio.mp4"
-        argv = _strip_audio(src, dst)
+        argv = _strip_audio(src, dst, {})
         # Keep the video track untouched, drop audio, write to dst.
         assert str(src) in argv
         assert str(dst) in argv
@@ -128,6 +128,120 @@ class TestStripAudioBuilder:
         assert "copy" in argv
         # No re-encoding of video → no codec like libx264.
         assert "libx264" not in argv
+
+
+class TestReplaceAudioBuilder:
+    """Verify the replace_audio argv without invoking ffmpeg."""
+
+    def test_replace_audio_argv(self, tmp_path):
+        from glitch_signal.media.ffmpeg import _replace_audio
+        src = tmp_path / "in.mp4"
+        dst = tmp_path / "in.replace_audio.mp4"
+        audio = tmp_path / "bgm.mp3"
+        audio.write_bytes(b"fake audio")
+        argv = _replace_audio(src, dst, {"audio_path": str(audio)})
+        # Two inputs: video + audio (looped).
+        assert argv.count("-i") == 2
+        assert str(src) in argv
+        assert str(audio) in argv
+        assert str(dst) in argv
+        # Audio is looped so short tracks still cover the video.
+        assert "-stream_loop" in argv
+        # Video is copied, audio is re-encoded to AAC.
+        assert "copy" in argv
+        assert "aac" in argv
+        # Explicit stream mapping drops the original audio track.
+        assert "-map" in argv
+        assert "0:v:0" in argv
+        assert "1:a:0" in argv
+        # Trim to whichever stream ends first (usually the video).
+        assert "-shortest" in argv
+
+    def test_replace_audio_requires_audio_path(self, tmp_path):
+        from glitch_signal.media.ffmpeg import _replace_audio
+        src = tmp_path / "in.mp4"
+        dst = tmp_path / "in.replace_audio.mp4"
+        with pytest.raises(ValueError, match="audio_path"):
+            _replace_audio(src, dst, {})
+
+    def test_replace_audio_missing_file_raises(self, tmp_path):
+        from glitch_signal.media.ffmpeg import _replace_audio
+        src = tmp_path / "in.mp4"
+        dst = tmp_path / "in.replace_audio.mp4"
+        with pytest.raises(FileNotFoundError):
+            _replace_audio(src, dst, {"audio_path": str(tmp_path / "nope.mp3")})
+
+    def test_replace_audio_custom_bitrate(self, tmp_path):
+        from glitch_signal.media.ffmpeg import _replace_audio
+        src = tmp_path / "in.mp4"
+        dst = tmp_path / "in.replace_audio.mp4"
+        audio = tmp_path / "bgm.mp3"
+        audio.write_bytes(b"x")
+        argv = _replace_audio(src, dst, {"audio_path": str(audio), "bitrate": "192k"})
+        assert "192k" in argv
+
+
+class TestParseEntry:
+    def test_string_entry(self):
+        from glitch_signal.media.ffmpeg import _parse_entry
+        assert _parse_entry("strip_audio") == ("strip_audio", {})
+
+    def test_dict_entry_splits_name_from_options(self):
+        from glitch_signal.media.ffmpeg import _parse_entry
+        name, opts = _parse_entry({"name": "replace_audio", "audio_path": "x.mp3"})
+        assert name == "replace_audio"
+        assert opts == {"audio_path": "x.mp3"}
+
+    def test_dict_entry_missing_name(self):
+        from glitch_signal.media.ffmpeg import _parse_entry
+        with pytest.raises(ValueError, match="name"):
+            _parse_entry({"audio_path": "x.mp3"})
+
+    def test_bad_entry_type(self):
+        from glitch_signal.media.ffmpeg import _parse_entry
+        with pytest.raises(ValueError):
+            _parse_entry(123)
+
+
+class TestApplyTransformsReplaceAudio:
+    @pytest.mark.asyncio
+    async def test_dict_entry_passes_options_through(self, tmp_path, monkeypatch):
+        from glitch_signal import config as cfg
+        from glitch_signal.media import ffmpeg as mod
+
+        configs = tmp_path / "configs"
+        configs.mkdir()
+        audio = tmp_path / "bgm.mp3"
+        audio.write_bytes(b"bgm bytes")
+        _write_brand(
+            configs,
+            "brand_ra",
+            media_pipeline={
+                "tiktok": [
+                    {"name": "replace_audio", "audio_path": str(audio)},
+                ]
+            },
+        )
+        monkeypatch.setenv("BRAND_CONFIGS_DIR", str(configs))
+        monkeypatch.setenv("DEFAULT_BRAND_ID", "brand_ra")
+        cfg.settings.cache_clear()
+        cfg._reset_brand_registry_for_tests()
+
+        vid = tmp_path / "clip.mp4"
+        vid.write_bytes(b"input")
+
+        calls: list[list[str]] = []
+
+        async def fake_run(argv):
+            calls.append(argv)
+            pathlib.Path(argv[-1]).write_bytes(b"o")
+        monkeypatch.setattr(mod, "_run_ffmpeg", fake_run)
+
+        out = await mod.apply_transforms(str(vid), "brand_ra", "upload_post_tiktok")
+        assert out.endswith(".replace_audio.mp4")
+        assert len(calls) == 1
+        assert str(audio) in calls[0]
+        assert "aac" in calls[0]
 
 
 class TestApplyTransformsRuns:

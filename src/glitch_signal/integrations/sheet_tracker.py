@@ -102,6 +102,31 @@ async def append_new_video(
         )
 
 
+async def read_by_video_name(
+    brand_id: str, video_name: str
+) -> dict[str, str] | None:
+    """Return the tracker row for `video_name` as a dict, or None if not found.
+
+    Used by caption_writer to pick up human-written captions from the sheet
+    before falling back to LLM generation.
+    """
+    target = sheet_target(brand_id)
+    if not target:
+        return None
+    sheet_id, worksheet = target
+    try:
+        return await gs.read_row_by_key(
+            sheet_id, worksheet, TRACKER_COLUMNS,
+            key_column=_KEY_COLUMN, key_value=video_name,
+        )
+    except Exception as exc:
+        log.warning(
+            "sheet_tracker.read_failed",
+            brand_id=brand_id, video_name=video_name, error=str(exc)[:200],
+        )
+        return None
+
+
 async def update_by_video_name(
     brand_id: str, video_name: str, updates: dict
 ) -> bool:

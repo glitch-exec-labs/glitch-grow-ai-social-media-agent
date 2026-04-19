@@ -18,6 +18,7 @@ This module owns a small, task-agnostic API:
 - ensure_header(sheet_id, worksheet, columns)     # idempotent header write
 - append_row(sheet_id, worksheet, columns, row)   # add a row (by column name dict)
 - update_row_by_key(sheet_id, worksheet, key_col, key, updates)   # partial update
+- read_row_by_key(sheet_id, worksheet, columns, key_col, key)     # fetch one row as dict
 
 The drive_scout / publisher / caption_writer nodes import these to keep
 the sheet in sync with DB state. No polling — pushes happen at the
@@ -143,6 +144,24 @@ async def update_row_by_key(
     )
 
 
+async def read_row_by_key(
+    sheet_id: str,
+    worksheet: str,
+    columns: list[str],
+    key_column: str,
+    key_value: str,
+) -> dict[str, str] | None:
+    """Return the row where `key_column == key_value` as {column: value}.
+
+    Returns None when no matching row exists. Missing trailing cells come
+    back as empty strings so callers can treat the result as a complete
+    dict keyed on `columns`.
+    """
+    return await asyncio.to_thread(
+        _read_row_sync, sheet_id, worksheet, columns, key_column, key_value,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Sync workers — called via asyncio.to_thread
 # ---------------------------------------------------------------------------
@@ -257,6 +276,34 @@ def _update_row_sync(
         updated_keys=list(updates.keys()),
     )
     return True
+
+
+@_with_retry
+def _read_row_sync(
+    sheet_id: str,
+    worksheet: str,
+    columns: list[str],
+    key_column: str,
+    key_value: str,
+) -> dict[str, str] | None:
+    svc = _service()
+    if key_column not in columns:
+        raise ValueError(
+            f"google_sheets: key_column {key_column!r} not in {columns}"
+        )
+    key_col_idx = columns.index(key_column)
+
+    resp = svc.spreadsheets().values().get(
+        spreadsheetId=sheet_id,
+        range=f"'{worksheet}'!A2:{_col_letter(len(columns))}",
+    ).execute()
+    rows = resp.get("values", []) or []
+
+    for r in rows:
+        if len(r) > key_col_idx and r[key_col_idx] == key_value:
+            padded = list(r) + [""] * (len(columns) - len(r))
+            return {col: padded[i] for i, col in enumerate(columns)}
+    return None
 
 
 # ---------------------------------------------------------------------------
