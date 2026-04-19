@@ -265,7 +265,7 @@ async def publish(
 # ---------------------------------------------------------------------------
 
 async def poll_status_for_post(
-    buffer_post_id: str, organization_id: str
+    buffer_post_id: str, organization_id: str | None = None
 ) -> tuple[str | None, str | None]:
     """Return (platform_post_id, share_url) for a Buffer post, or (None, None).
 
@@ -277,7 +277,14 @@ async def poll_status_for_post(
     `externalLink` (the native TikTok URL once published). We don't get
     the per-platform post id separately — the externalLink carries it
     in the path, which is enough for sheet tracking and observability.
+
+    `organization_id` is accepted for API symmetry with the brand-config
+    caller but is NOT part of Buffer's PostInput schema — the post id
+    alone is the key. The param stays to keep the scheduler callsite
+    uniform; remove once we're confident no branch relies on it.
     """
+    del organization_id  # retained for caller symmetry, unused in query
+
     s = settings()
     if not s.buffer_api_token:
         raise RuntimeError("BUFFER_API_TOKEN is not set")
@@ -289,12 +296,8 @@ async def poll_status_for_post(
         "  }"
         "}"
     )
-    variables = {
-        "input": {
-            "id": buffer_post_id,
-            "organizationId": organization_id,
-        }
-    }
+    # Buffer's PostInput is {id} only — organizationId is not in its schema.
+    variables = {"input": {"id": buffer_post_id}}
 
     async with httpx.AsyncClient(timeout=_POLL_TIMEOUT_S) as client:
         resp = await client.post(
