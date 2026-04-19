@@ -299,16 +299,31 @@ def _submit_upload(
         user=user,
         platforms=[target_platform],
     )
-    # Title handling is platform-specific:
-    # - YouTube / Pinterest / LinkedIn: title is a real field (required or
-    #   strongly recommended). Pass it.
-    # - TikTok / Instagram / X / Threads / Bluesky: the platform has no
-    #   title concept, and Upload-Post prepends it to the caption body.
-    #   We want a clean caption → skip the title kwarg for these.
-    if title and target_platform in ("youtube", "pinterest", "linkedin"):
-        kwargs["title"] = title
-    if caption:
-        kwargs["description"] = caption
+    # Field mapping for the Upload-Post SDK is platform-dependent:
+    #
+    # - YouTube / Pinterest / LinkedIn / Reddit:
+    #     title       → real title / post-title field
+    #     description → body / description field
+    #
+    # - TikTok / Instagram / X / Threads / Bluesky:
+    #     title       → THE CAPTION BODY (no separate description concept)
+    #     description → sent, but silently ignored on the TikTok side
+    #
+    # The earlier code sent the caption as `description` for TikTok,
+    # which landed the caption in an Upload-Post internal field but
+    # never reached TikTok's post — the description column on the post
+    # UI stayed empty. Fix: for title-less platforms, the caption goes
+    # into `title`. Upload-Post doesn't have a "title is a title"
+    # concept on these platforms — their `title` IS the caption field.
+    _TITLE_IS_CAPTION = ("tiktok", "instagram", "x", "threads", "bluesky")
+    if target_platform in _TITLE_IS_CAPTION:
+        if caption:
+            kwargs["title"] = caption
+    else:
+        if title:
+            kwargs["title"] = title
+        if caption:
+            kwargs["description"] = caption
     kwargs.update(extras)
 
     resp = client.upload_video(**kwargs)

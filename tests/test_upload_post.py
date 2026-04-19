@@ -115,12 +115,20 @@ class TestPlatformExtras:
         assert _platform_extras("bluesky", {"anything": 1}) == {}
 
 
-class TestNoTitleForShortFormPlatforms:
-    """TikTok / IG / X etc. don't have a title concept — passing one leaks
-    into the caption body. _submit_upload should skip the title kwarg for
-    these and only pass it to YouTube / Pinterest / LinkedIn."""
+class TestCaptionFieldMapping:
+    """Upload-Post's field semantics differ by platform:
 
-    def test_tiktok_call_omits_title(self, monkeypatch):
+    - Short-form (TikTok / IG / X / Threads / Bluesky): the SDK's `title`
+      kwarg IS the caption body. `description` is a separate optional
+      field that is silently ignored on these platforms — which is how
+      nmahya's first live posts went up with an empty description column
+      on TikTok. _submit_upload must send the caption as `title` for
+      these platforms and skip `description`.
+    - Long-form (YouTube / Pinterest / LinkedIn / Reddit): `title` is
+      the real post title and `description` is the body.
+    """
+
+    def test_tiktok_caption_goes_into_title(self, monkeypatch):
         from glitch_signal.platforms import upload_post as up
 
         captured: dict = {}
@@ -140,11 +148,41 @@ class TestNoTitleForShortFormPlatforms:
         up._submit_upload(
             api_key="k", user="MyBrand", target_platform="tiktok",
             video_url="https://x/media/fetch?token=t",
-            caption="Body text here #foo", title="Would leak into caption",
+            caption="Body text here #foo", title="Derived-title (should be ignored)",
             extras={},
         )
-        assert "title" not in captured, f"title should NOT be in tiktok upload kwargs, got {list(captured)}"
-        assert captured.get("description") == "Body text here #foo"
+        assert captured.get("title") == "Body text here #foo", (
+            f"tiktok caption must land in `title`, got {captured}"
+        )
+        assert "description" not in captured, (
+            f"`description` silently drops on tiktok — don't send it, got {captured}"
+        )
+
+    def test_instagram_caption_goes_into_title(self, monkeypatch):
+        from glitch_signal.platforms import upload_post as up
+
+        captured: dict = {}
+
+        class _C:
+            def upload_video(self, **kwargs):
+                captured.update(kwargs)
+                return {"success": True, "request_id": "r"}
+
+        import sys
+        monkeypatch.setitem(
+            sys.modules,
+            "upload_post",
+            type("M", (), {"UploadPostClient": lambda api_key=None: _C()}),
+        )
+
+        up._submit_upload(
+            api_key="k", user="MyBrand", target_platform="instagram",
+            video_url="https://x/media/fetch?token=t",
+            caption="IG caption with #hashtags", title="ignored",
+            extras={},
+        )
+        assert captured.get("title") == "IG caption with #hashtags"
+        assert "description" not in captured
 
     def test_youtube_call_includes_title(self, monkeypatch):
         from glitch_signal.platforms import upload_post as up
