@@ -67,10 +67,21 @@ Rules:
   no "game-changer", no emoji walls. Technical, direct, specific.
 - Hook slide: one sentence ≤ 12 words that stops the scroll. Subtitle ≤ 18 words.
 - Body slides: each one self-contained. Title ≤ 8 words, body ≤ 35 words.
-- Every slide carries a concrete specific (metric, decision, tradeoff).
+- Every slide carries a concrete specific — prefer a DECISION or a TRADEOFF
+  to a METRIC. Metrics only if the signal contained them; don't invent.
 - NO slide should just repeat the hook in different words.
 - CTA slide: invite people to the repo / site. One action, no ladder.
-- Never promise financial outcomes. Never say "results guaranteed".
+
+HARD GUARD RAILS — any carousel violating these will be rejected at review:
+1. Do NOT claim a measured outcome (percent / ROI / reduction / growth /
+   savings / revenue) unless the signal you were given explicitly contains
+   that number. Describe the BUILD, not the RESULT.
+2. Do NOT use marketing verbs: "reduces", "boosts", "delivers", "improves".
+   Use "targets", "aims to", "was built to", "is running", "is in production".
+3. Do NOT use hype adjectives: game-changing, revolutionary, cutting-edge,
+   industry-leading, robust, powerful, seamless.
+4. No "excited to announce" / "thrilled to share" / "proud to introduce".
+5. Never promise financial outcomes. Never say "results guaranteed".
 
 Output valid JSON only, no markdown fences, matching this schema:
 {
