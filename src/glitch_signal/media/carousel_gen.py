@@ -21,12 +21,11 @@ import asyncio
 import json
 import pathlib
 import uuid
-from io import BytesIO
 from typing import Any
 
 import litellm
 import structlog
-from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageFont
+from PIL import Image, ImageDraw, ImageFont
 from tenacity import (
     retry,
     retry_if_exception_type,

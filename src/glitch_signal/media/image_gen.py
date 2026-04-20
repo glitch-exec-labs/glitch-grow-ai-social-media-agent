@@ -91,11 +91,11 @@ async def _generate_via_fal(prompt: str, aspect: AspectRatio, model: str) -> str
     """Call fal.ai, return the image URL. Retries on network/ImageGenError."""
     # Run the sync fal-client call off the event loop so the graph stays
     # responsive even if fal is slow.
-    import fal_client
-
     # fal-client reads FAL_KEY from env; settings loader sets the env var at
     # startup via pydantic_settings, but to be safe we also set it here.
     import os
+
+    import fal_client
     if settings().fal_api_key and not os.environ.get("FAL_KEY"):
         os.environ["FAL_KEY"] = settings().fal_api_key
 

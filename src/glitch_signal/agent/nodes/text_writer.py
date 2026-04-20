@@ -13,14 +13,12 @@ The LLM prompt is brand-aware:
 """
 from __future__ import annotations
 
-import json
 import pathlib
 import uuid
 from datetime import UTC, datetime, timedelta
 
 import litellm
 import structlog
-from sqlmodel import select
 from tenacity import (
     retry,
     retry_if_exception_type,
@@ -231,7 +229,7 @@ async def text_writer_node(state: SignalAgentState) -> SignalAgentState:
     )
 
     # Fire Telegram preview messages for each generated post
-    for cs_id, sp_id, platform_key, body in created_ids:
+    for _cs_id, sp_id, platform_key, body in created_ids:
         await _send_text_preview(
             sp_id=sp_id,
             brand_id=brand_id,
