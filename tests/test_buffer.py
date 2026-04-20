@@ -135,7 +135,8 @@ class TestBufferLiveValidation:
         from glitch_signal import config
         from glitch_signal.platforms import buffer
 
-        configs = tmp_path / "configs"; configs.mkdir()
+        configs = tmp_path / "configs"
+        configs.mkdir()
         _write_brand(configs, "brand_ig")
         # Overwrite the config to use buffer_instagram instead.
         (configs / "brand_ig.json").write_text(json.dumps({
@@ -151,7 +152,8 @@ class TestBufferLiveValidation:
         config.settings.cache_clear()
         config._reset_brand_registry_for_tests()
 
-        vid = tmp_path / "v.mp4"; vid.write_bytes(b"x")
+        vid = tmp_path / "v.mp4"
+        vid.write_bytes(b"x")
         with pytest.raises(NotImplementedError, match="only tiktok"):
             await buffer.publish(
                 platform="buffer_instagram", file_path=str(vid),
@@ -163,7 +165,8 @@ class TestBufferLiveValidation:
         from glitch_signal import config
         from glitch_signal.platforms import buffer
 
-        configs = tmp_path / "configs"; configs.mkdir()
+        configs = tmp_path / "configs"
+        configs.mkdir()
         _write_brand(configs, "brand_noc", channel_id="")
         monkeypatch.setenv("DISPATCH_MODE", "live")
         monkeypatch.setenv("BUFFER_API_TOKEN", "t")
@@ -172,7 +175,8 @@ class TestBufferLiveValidation:
         config.settings.cache_clear()
         config._reset_brand_registry_for_tests()
 
-        vid = tmp_path / "v.mp4"; vid.write_bytes(b"x")
+        vid = tmp_path / "v.mp4"
+        vid.write_bytes(b"x")
         with pytest.raises(RuntimeError, match="channel_id"):
             await buffer.publish(
                 platform="buffer_tiktok", file_path=str(vid),
@@ -184,7 +188,8 @@ class TestBufferLiveValidation:
         from glitch_signal import config
         from glitch_signal.platforms import buffer
 
-        configs = tmp_path / "configs"; configs.mkdir()
+        configs = tmp_path / "configs"
+        configs.mkdir()
         _write_brand(configs, "brand_noo", organization_id="")
         monkeypatch.setenv("DISPATCH_MODE", "live")
         monkeypatch.setenv("BUFFER_API_TOKEN", "t")
@@ -193,7 +198,8 @@ class TestBufferLiveValidation:
         config.settings.cache_clear()
         config._reset_brand_registry_for_tests()
 
-        vid = tmp_path / "v.mp4"; vid.write_bytes(b"x")
+        vid = tmp_path / "v.mp4"
+        vid.write_bytes(b"x")
         with pytest.raises(RuntimeError, match="organization_id"):
             await buffer.publish(
                 platform="buffer_tiktok", file_path=str(vid),
@@ -205,7 +211,8 @@ class TestBufferLiveValidation:
         from glitch_signal import config
         from glitch_signal.platforms import buffer
 
-        configs = tmp_path / "configs"; configs.mkdir()
+        configs = tmp_path / "configs"
+        configs.mkdir()
         _write_brand(configs, "brand_nf")
         monkeypatch.setenv("DISPATCH_MODE", "live")
         monkeypatch.setenv("BUFFER_API_TOKEN", "t")

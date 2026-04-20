@@ -10,6 +10,7 @@ stores one row per (brand_id, platform, account_identifier) tuple.
 from __future__ import annotations
 
 import sqlalchemy as sa
+
 from alembic import op
 
 revision = "0003"

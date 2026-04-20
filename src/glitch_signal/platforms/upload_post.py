@@ -54,6 +54,11 @@ log = structlog.get_logger(__name__)
 # Upload-Post's canonical platform names (from their SDK):
 #   tiktok, instagram, youtube, linkedin, facebook, pinterest, threads,
 #   bluesky, x, reddit, google_business
+# Platforms where Upload-Post's SDK `title` kwarg IS the caption body
+# (not a separate title field). See the field-mapping comment in
+# _submit_upload for the full explanation.
+_TITLE_IS_CAPTION = ("tiktok", "instagram", "x", "threads", "bluesky")
+
 _PLATFORM_MAP = {
     "upload_post_tiktok":    "tiktok",
     "upload_post_instagram": "instagram",
@@ -382,7 +387,6 @@ def _submit_upload(
     # UI stayed empty. Fix: for title-less platforms, the caption goes
     # into `title`. Upload-Post doesn't have a "title is a title"
     # concept on these platforms — their `title` IS the caption field.
-    _TITLE_IS_CAPTION = ("tiktok", "instagram", "x", "threads", "bluesky")
     if target_platform in _TITLE_IS_CAPTION:
         if caption:
             kwargs["title"] = caption

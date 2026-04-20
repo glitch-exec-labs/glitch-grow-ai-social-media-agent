@@ -10,12 +10,12 @@ from __future__ import annotations
 import asyncio
 from logging.config import fileConfig
 
-from alembic import context
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlmodel import SQLModel
 
 # Import all models so their metadata is registered
 import glitch_signal.db.models  # noqa: F401
+from alembic import context
 from glitch_signal.config import settings
 
 config = context.config

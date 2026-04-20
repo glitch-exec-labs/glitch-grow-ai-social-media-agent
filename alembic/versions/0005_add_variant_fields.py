@@ -13,6 +13,7 @@ ScheduledPost at schedule time and the dispatcher just reads them.
 from __future__ import annotations
 
 import sqlalchemy as sa
+
 from alembic import op
 
 revision = "0005"
