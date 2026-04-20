@@ -27,6 +27,7 @@ from glitch_signal.agent.nodes.scout import scout_node
 from glitch_signal.agent.nodes.script_writer import script_writer_node
 from glitch_signal.agent.nodes.storyboard import storyboard_node
 from glitch_signal.agent.nodes.telegram_preview import telegram_preview_node
+from glitch_signal.agent.nodes.text_writer import text_writer_node
 from glitch_signal.agent.nodes.video_assembler import video_assembler_node
 from glitch_signal.agent.nodes.video_generator import video_generator_node
 from glitch_signal.agent.nodes.video_router import video_router_node
@@ -81,12 +82,35 @@ def _entry_router(state: SignalAgentState) -> str:
     return "drive_scout" if cs == "drive_footage" else "scout"
 
 
+def _post_scout_router(state: SignalAgentState) -> str:
+    """After scout discovers signals, pick the next node based on the brand's
+    content_format. Text brands skip the video chain entirely.
+
+    Also short-circuits to END if scout didn't find a signal worth processing
+    (no signal_id in state means nothing to script).
+    """
+    from glitch_signal.config import brand_config
+
+    if not state.get("signal_id"):
+        return "end"
+
+    brand_id = state.get("brand_id")
+    if brand_id:
+        try:
+            fmt = (brand_config(brand_id).get("content_format") or "video").strip().lower()
+            return "text_writer" if fmt == "text" else "script_writer"
+        except KeyError:
+            pass
+    return "script_writer"
+
+
 def build_graph() -> StateGraph:
     """Build and compile the full pipeline graph."""
     graph = StateGraph(SignalAgentState)
 
     # ai_generated branch (existing Glitch Executor pipeline)
     graph.add_node("scout", scout_node)
+    graph.add_node("text_writer", text_writer_node)
     graph.add_node("script_writer", script_writer_node)
     graph.add_node("storyboard", storyboard_node)
     graph.add_node("video_router", video_router_node)
@@ -106,8 +130,17 @@ def build_graph() -> StateGraph:
         {"scout": "scout", "drive_scout": "drive_scout"},
     )
 
-    # ai_generated path
-    graph.add_edge("scout", "script_writer")
+    # ai_generated path — scout forks into text vs video based on brand config
+    graph.add_conditional_edges(
+        "scout",
+        _post_scout_router,
+        {
+            "text_writer": "text_writer",
+            "script_writer": "script_writer",
+            "end": END,
+        },
+    )
+    graph.add_edge("text_writer", END)   # text_writer sends its own Telegram preview
     graph.add_edge("script_writer", "storyboard")
     graph.add_edge("storyboard", "video_router")
     graph.add_edge("video_router", "video_generator")

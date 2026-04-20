@@ -96,7 +96,11 @@ class ScheduledPost(SQLModel, table=True):
 
     id: str = Field(primary_key=True)
     brand_id: str = Field(index=True, default="glitch_executor")
-    asset_id: str = Field(foreign_key="video_asset.id", index=True)
+    # asset_id is nullable for text-only posts (no backing VideoAsset). The
+    # text pipeline creates a ContentScript and stores its id in script_id
+    # instead. Exactly one of (asset_id, script_id) must be set on a row.
+    asset_id: str | None = Field(default=None, foreign_key="video_asset.id", index=True)
+    script_id: str | None = Field(default=None, foreign_key="content_script.id", index=True)
     platform: str
     scheduled_for: datetime
     status: str = "pending_veto"

@@ -46,6 +46,10 @@ class Settings(BaseSettings):
     replicate_api_token: str = ""
     replicate_image_model: str = "recraft-ai/recraft-v3"
 
+    # --- Image generation (fal.ai) — primary provider, faster + cheaper ---
+    fal_api_key: str = ""
+    fal_image_model: str = "fal-ai/flux/schnell"
+
     # --- Platforms (Phase 1: YouTube) ---
     youtube_client_secrets_file: str = "credentials/youtube_client_secrets.json"
     youtube_channel_id: str = ""

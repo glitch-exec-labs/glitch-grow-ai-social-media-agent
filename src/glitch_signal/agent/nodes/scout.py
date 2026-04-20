@@ -34,15 +34,54 @@ GITHUB_API = "https://api.github.com"
 
 
 async def scout_node(state: SignalAgentState) -> SignalAgentState:
-    """Entry-point node. Discovers new signals and writes them to DB."""
+    """Entry-point node. Discovers new signals AND picks the next one to process.
+
+    Writes Signal rows to the DB (novelty_score >= 0.6), then selects the
+    highest-scored unprocessed signal for this brand and sets signal_id in
+    state so downstream nodes (text_writer / script_writer) have something to
+    work on. One graph run == one signal processed. Multiple new signals from
+    one scout are drained across subsequent runs.
+    """
+    from sqlmodel import select
+
+    from glitch_signal.db.models import Signal as SignalTable
+
     brand_id = state.get("brand_id") or settings().default_brand_id
     factory = _session_factory()
     async with factory() as session:
         signals = await _run_scout(session, brand_id=brand_id)
         await session.commit()
 
-    log.info("scout.done", new_signals=len(signals), brand_id=brand_id)
-    return {**state, "brand_id": brand_id, "signals": signals}
+        # Pick the next unprocessed signal for this brand. We look at the DB
+        # rather than `signals` alone so we drain past leftovers too.
+        result = await session.execute(
+            select(SignalTable)
+            .where(SignalTable.brand_id == brand_id)
+            .where(SignalTable.status == "queued")
+            .where(SignalTable.novelty_score >= NOVELTY_THRESHOLD)
+            .order_by(SignalTable.novelty_score.desc(), SignalTable.created_at.asc())
+            .limit(1)
+        )
+        next_signal = result.scalars().first()
+        next_id = next_signal.id if next_signal else ""
+        if next_signal:
+            # Claim it — subsequent runs skip this one
+            next_signal.status = "scripting"
+            session.add(next_signal)
+            await session.commit()
+
+    log.info(
+        "scout.done",
+        new_signals=len(signals),
+        brand_id=brand_id,
+        picked_signal_id=next_id[:12] if next_id else None,
+    )
+    return {
+        **state,
+        "brand_id": brand_id,
+        "signals": signals,
+        "signal_id": next_id,
+    }
 
 
 async def _run_scout(session: AsyncSession, brand_id: str) -> list[dict]:

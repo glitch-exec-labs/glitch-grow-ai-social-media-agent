@@ -72,6 +72,9 @@ dependencies = [
   # Replicate — image generation via recraft-v3 / FLUX for LinkedIn image posts.
   "replicate>=1.0",
 
+  # fal.ai — primary image generation provider (FLUX.1-schnell, fast + cheap).
+  "fal-client>=0.5",
+
   # Upload-Post — forked to glitch-exec-labs/upload-post-pip so we can
   # track upstream releases and patch LinkedIn document support as needed.
   "upload-post @ git+https://github.com/glitch-exec-labs/upload-post-pip.git@main",

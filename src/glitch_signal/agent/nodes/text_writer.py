@@ -1,0 +1,400 @@
+"""TextWriter node — generates a text post per enabled text platform for a Signal.
+
+Replaces the script_writer → storyboard → video_generator chain for brands
+with content_format="text" (glitch_executor, glitch_founder). Output per
+signal is one ContentScript per enabled upload_post_* text platform, each
+paired with a ScheduledPost (status=pending_veto) so the existing Telegram
+approve/veto + scheduler dispatch works unchanged.
+
+The LLM prompt is brand-aware:
+  - brand voice prompt          (brand/prompts/<brand>_voice.md)
+  - platform playbook           (brand/prompts/platform_playbook.md)
+  - per-platform rules enforced (char limits, link placement)
+"""
+from __future__ import annotations
+
+import json
+import pathlib
+import uuid
+from datetime import UTC, datetime, timedelta
+
+import litellm
+import structlog
+from sqlmodel import select
+from tenacity import (
+    retry,
+    retry_if_exception_type,
+    stop_after_attempt,
+    wait_exponential,
+)
+
+from glitch_signal.agent.llm import pick
+from glitch_signal.agent.state import SignalAgentState
+from glitch_signal.config import brand_config, settings
+from glitch_signal.db.models import ContentScript, ScheduledPost, Signal
+from glitch_signal.db.session import _session_factory
+
+log = structlog.get_logger(__name__)
+
+VETO_WINDOW_HOURS = 48
+
+# Which platform keys in a brand config emit text posts (vs video).
+TEXT_PLATFORM_KEYS = ("upload_post_x", "upload_post_linkedin")
+
+# Per-platform hard limits. Kept conservative; LLM targets ~80% of max.
+PLATFORM_CHAR_LIMIT = {
+    "upload_post_x": 280,
+    "upload_post_linkedin": 2800,   # LinkedIn allows 3000; sweet spot ~1300-2500
+}
+# Target length (mid-sweet-spot). LLM instructed to stay close.
+PLATFORM_TARGET_CHARS = {
+    "upload_post_x": 250,
+    "upload_post_linkedin": 1800,
+}
+
+
+async def text_writer_node(state: SignalAgentState) -> SignalAgentState:
+    """Produce one text post per enabled text platform for the given Signal.
+
+    Requires `signal_id` in state — scout_node populates it to the top
+    unprocessed Signal for the brand on each run.
+    """
+    signal_id = state.get("signal_id") or ""
+    if not signal_id:
+        log.warning("text_writer.no_signal_id")
+        return {**state, "error": "text_writer: no signal_id in state"}
+
+    factory = _session_factory()
+    async with factory() as session:
+        signal = await session.get(Signal, signal_id)
+        if not signal:
+            return {**state, "error": f"text_writer: Signal {signal_id} not found"}
+
+        brand_id = (
+            state.get("brand_id")
+            or getattr(signal, "brand_id", None)
+            or settings().default_brand_id
+        )
+        cfg = brand_config(brand_id)
+        platforms_cfg = cfg.get("platforms", {}) or {}
+
+        # Which text platforms are enabled for this brand right now?
+        enabled_platforms = [
+            key for key in TEXT_PLATFORM_KEYS
+            if (platforms_cfg.get(key) or {}).get("enabled")
+        ]
+        if not enabled_platforms:
+            log.info("text_writer.no_text_platforms_enabled", brand_id=brand_id)
+            # Mark the signal scripted so we don't loop on it
+            signal.status = "scripted"
+            session.add(signal)
+            await session.commit()
+            return {**state, "brand_id": brand_id, "error": "no text platforms enabled"}
+
+        voice_text = _load_voice(cfg)
+        playbook_text = _load_playbook(cfg)
+
+        now = datetime.now(UTC).replace(tzinfo=None)
+        veto_deadline = now + timedelta(hours=VETO_WINDOW_HOURS)
+
+        created_ids: list[str] = []
+        for platform_key in enabled_platforms:
+            short_platform = platform_key.replace("upload_post_", "")
+            try:
+                body = await _write_post(
+                    signal=signal,
+                    brand_id=brand_id,
+                    platform_short=short_platform,
+                    voice_text=voice_text,
+                    playbook_text=playbook_text,
+                )
+            except Exception as exc:
+                log.warning(
+                    "text_writer.generation_failed",
+                    signal_id=signal_id,
+                    platform=platform_key,
+                    error=str(exc)[:200],
+                )
+                continue
+
+            body = _enforce_char_limit(body, platform_key)
+
+            cs = ContentScript(
+                id=str(uuid.uuid4()),
+                brand_id=brand_id,
+                signal_id=signal.id,
+                platform=platform_key,
+                script_body=body,
+                content_type="text",
+                key_visuals="[]",
+                shots="[]",
+                status="draft",
+            )
+            session.add(cs)
+
+            sp = ScheduledPost(
+                id=str(uuid.uuid4()),
+                brand_id=brand_id,
+                asset_id=None,           # text posts have no video asset
+                script_id=cs.id,         # direct link to ContentScript
+                platform=platform_key,
+                scheduled_for=veto_deadline,  # auto-publish when veto window lapses
+                status="pending_veto",
+                veto_deadline=veto_deadline,
+            )
+            session.add(sp)
+            created_ids.append((cs.id, sp.id, platform_key, body))
+
+        signal.status = "scripted"
+        session.add(signal)
+        await session.commit()
+
+    log.info(
+        "text_writer.done",
+        signal_id=signal_id,
+        brand_id=brand_id,
+        posts_created=len(created_ids),
+    )
+
+    # Fire Telegram preview messages for each generated post
+    for cs_id, sp_id, platform_key, body in created_ids:
+        await _send_text_preview(
+            sp_id=sp_id,
+            brand_id=brand_id,
+            platform_key=platform_key,
+            body=body,
+            veto_deadline=veto_deadline,
+        )
+
+    return {
+        **state,
+        "brand_id": brand_id,
+        "preview_sent": True,
+        "veto_deadline": veto_deadline.isoformat(),
+    }
+
+
+# ---------------------------------------------------------------------------
+# LLM call (with retry for Gemini 503 bursts)
+# ---------------------------------------------------------------------------
+
+@retry(
+    reraise=True,
+    stop=stop_after_attempt(4),
+    wait=wait_exponential(multiplier=1, min=2, max=30),
+    retry=retry_if_exception_type(
+        (litellm.ServiceUnavailableError, litellm.RateLimitError, litellm.APIConnectionError)
+    ),
+)
+async def _call_llm(mc, messages: list[dict]) -> str:
+    resp = await litellm.acompletion(
+        model=mc.model,
+        messages=messages,
+        max_tokens=4096,        # headroom for Gemini thinking tokens
+        **mc.kwargs,
+    )
+    return (resp.choices[0].message.content or "").strip()
+
+
+async def _write_post(
+    *,
+    signal: Signal,
+    brand_id: str,
+    platform_short: str,
+    voice_text: str,
+    playbook_text: str,
+) -> str:
+    """Generate the post body for a single (signal, platform) pair."""
+    target_chars = PLATFORM_TARGET_CHARS.get(f"upload_post_{platform_short}", 1500)
+    limit = PLATFORM_CHAR_LIMIT.get(f"upload_post_{platform_short}", 2800)
+
+    system_prompt = _build_system_prompt(
+        brand_id=brand_id,
+        platform_short=platform_short,
+        voice_text=voice_text,
+        playbook_text=playbook_text,
+        target_chars=target_chars,
+        limit=limit,
+    )
+    user_prompt = _build_user_prompt(signal)
+
+    mc = pick("smart" if settings().anthropic_api_key else "cheap")
+    raw = await _call_llm(
+        mc,
+        [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+    )
+    # The LLM may include framing like "Here's the post:" — strip to the body
+    return _extract_body(raw)
+
+
+def _build_system_prompt(
+    *,
+    brand_id: str,
+    platform_short: str,
+    voice_text: str,
+    playbook_text: str,
+    target_chars: int,
+    limit: int,
+) -> str:
+    platform_rules = {
+        "x": (
+            f"Platform: X (Twitter). HARD LIMIT {limit} characters — anything longer will be rejected.\n"
+            f"Aim for {target_chars} characters. Short, punchy, one clear hook.\n"
+            "Rules from playbook:\n"
+            "- First 70-100 chars are the hook — they decide whether people read on.\n"
+            "- Max 2 hashtags. Place them at the end, natural only.\n"
+            "- NO external link in post body for Premium reach (link only if essential).\n"
+            "- Specific numbers beat vague claims (say '14d ROAS 1.24×' not 'great ROAS').\n"
+        ),
+        "linkedin": (
+            f"Platform: LinkedIn. Max {limit} chars; aim for {target_chars} (sweet spot 1300-2500).\n"
+            "Rules from playbook:\n"
+            "- First 140 chars must be the hook (mobile cutoff above 'see more').\n"
+            "- One sentence per line. White space between ideas.\n"
+            "- 3-5 hashtags at the end (never scattered).\n"
+            "- No external link at the top — put it plain-text near the end if needed.\n"
+            "- Concrete metrics and decisions > abstract claims.\n"
+            "- End with a thought that invites engagement (not 'what do you think?' bait).\n"
+        ),
+    }.get(platform_short, "")
+
+    return (
+        f"{voice_text}\n\n"
+        f"---\n"
+        f"{platform_rules}\n"
+        f"---\n"
+        f"Platform playbook (condensed):\n{playbook_text[:3000]}\n"
+        f"---\n"
+        "Output ONLY the post body. No prefix like 'Here's the post:'. No JSON. No markdown fences.\n"
+        "Just the exact text that will be published."
+    )
+
+
+def _build_user_prompt(signal: Signal) -> str:
+    return (
+        f"Write a post about this shipped work:\n\n"
+        f"Source: {signal.source} (ref: {signal.source_ref})\n"
+        f"Summary: {signal.summary}\n\n"
+        f"The signal was scored novelty={signal.novelty_score:.2f} — tune the tone "
+        "to match the actual significance. Don't over-hype."
+    )
+
+
+def _extract_body(raw: str) -> str:
+    """Strip common LLM framing like 'Here's the post:' or markdown fences."""
+    text = raw.strip()
+    # Strip code fences if the model wrapped it
+    if text.startswith("```"):
+        parts = text.split("```")
+        if len(parts) >= 3:
+            # take the body of the first fenced block
+            text = parts[1]
+            # drop leading language tag line if present ("text\n", "markdown\n")
+            if "\n" in text:
+                first_line, rest = text.split("\n", 1)
+                if len(first_line) <= 20 and " " not in first_line:
+                    text = rest
+    # Strip framing lines at the top
+    lines = text.split("\n")
+    while lines and lines[0].lower().strip() in (
+        "here is the post:",
+        "here's the post:",
+        "post:",
+    ):
+        lines = lines[1:]
+    return "\n".join(lines).strip()
+
+
+def _enforce_char_limit(body: str, platform_key: str) -> str:
+    limit = PLATFORM_CHAR_LIMIT.get(platform_key)
+    if limit and len(body) > limit:
+        log.warning(
+            "text_writer.truncating_body",
+            platform=platform_key,
+            original_len=len(body),
+            limit=limit,
+        )
+        return body[: limit - 1].rstrip() + "…"
+    return body
+
+
+# ---------------------------------------------------------------------------
+# Brand voice + playbook loaders
+# ---------------------------------------------------------------------------
+
+def _load_voice(cfg: dict) -> str:
+    path = cfg.get("voice_prompt_path")
+    if not path:
+        return ""
+    p = pathlib.Path(path)
+    return p.read_text() if p.exists() else ""
+
+
+def _load_playbook(cfg: dict) -> str:
+    path = cfg.get("platform_playbook_path")
+    if not path:
+        return ""
+    p = pathlib.Path(path)
+    return p.read_text() if p.exists() else ""
+
+
+# ---------------------------------------------------------------------------
+# Telegram preview (text version — no video attachment)
+# ---------------------------------------------------------------------------
+
+async def _send_text_preview(
+    *,
+    sp_id: str,
+    brand_id: str,
+    platform_key: str,
+    body: str,
+    veto_deadline: datetime,
+) -> None:
+    if settings().is_dry_run:
+        log.info("text_writer.preview.dry_run", sp_id=sp_id, platform=platform_key)
+        return
+
+    # No Telegram bot configured → skip preview, don't crash. The
+    # ScheduledPost is still in pending_veto and will auto-promote to
+    # queued after the veto window; the operator can approve via the
+    # /veto & /list admin commands once the bot is wired in.
+    token = settings().telegram_bot_token_signal
+    admin_ids = settings().admin_telegram_ids
+    if not token or not admin_ids:
+        log.warning(
+            "text_writer.preview.skipped_no_telegram",
+            sp_id=sp_id,
+            platform=platform_key,
+            reason="TELEGRAM_BOT_TOKEN_SIGNAL or TELEGRAM_ADMIN_IDS not set",
+        )
+        return
+
+    from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
+
+    bot = Bot(token=token)
+    keyboard = InlineKeyboardMarkup([[
+        InlineKeyboardButton("Approve now", callback_data=f"approve:{sp_id}"),
+        InlineKeyboardButton("Veto", callback_data=f"veto:{sp_id}"),
+    ]])
+
+    display = brand_config(brand_id).get("display_name", brand_id)
+    platform_label = platform_key.replace("upload_post_", "").upper()
+    chars = len(body)
+
+    header = (
+        f"[{display}] Text preview — {platform_label}\n"
+        f"{chars} chars · ID: {sp_id[:8]}\n"
+        f"Auto-publishes at {veto_deadline.strftime('%Y-%m-%d %H:%M UTC')}\n"
+        f"───\n"
+    )
+    # Telegram message limit is ~4096 chars; our posts are well under that
+    full = header + body
+
+    for admin_id in admin_ids:
+        try:
+            await bot.send_message(chat_id=admin_id, text=full, reply_markup=keyboard)
+        except Exception as exc:
+            log.warning("text_writer.preview_send_failed", admin_id=admin_id, error=str(exc))

@@ -49,10 +49,14 @@ async def publish(scheduled_post_id: str) -> None:
             await session.commit()
             return
 
-        asset = await session.get(VideoAsset, sp.asset_id)
-        if not asset:
-            await _mark_failed(session, sp, "VideoAsset not found")
-            return
+        # Text-post path: no VideoAsset, publish body comes from ContentScript.
+        is_text_post = sp.asset_id is None and sp.script_id is not None
+        asset = None
+        if not is_text_post:
+            asset = await session.get(VideoAsset, sp.asset_id)
+            if not asset:
+                await _mark_failed(session, sp, "VideoAsset not found")
+                return
 
         sp.status = "dispatching"
         sp.attempts += 1
@@ -62,25 +66,40 @@ async def publish(scheduled_post_id: str) -> None:
         attempts_before_call = sp.attempts
 
     try:
-        brand_id = getattr(sp, "brand_id", None) or getattr(asset, "brand_id", None)
-        # JIT download — drive_scout no longer pre-downloads; it just
-        # records the expected local path. If the file isn't on disk,
-        # fetch it from Drive now. Re-runs are a no-op once downloaded.
-        await _ensure_local_file(asset)
-        # Pre-publish ffmpeg transforms (brand-config driven). Returns the
-        # original path unchanged for brands with no `media_pipeline`
-        # entry for this platform — zero cost on the common path.
-        from glitch_signal.media.ffmpeg import apply_transforms
-        publish_file_path = await apply_transforms(
-            asset.file_path, brand_id or "", sp.platform
+        brand_id = getattr(sp, "brand_id", None) or (
+            getattr(asset, "brand_id", None) if asset else None
         )
-        platform_post_id, platform_url = await _publish_to_platform(
-            sp.platform,
-            publish_file_path,
-            asset.script_id,
-            brand_id=brand_id,
-            attempts=attempts_before_call,
-        )
+
+        if is_text_post:
+            # No file transforms, no video asset. upload_post.publish() reads
+            # the post body from the ContentScript via script_id when
+            # content_type="text" on the platform config.
+            platform_post_id, platform_url = await _publish_to_platform(
+                sp.platform,
+                None,                 # no file_path
+                sp.script_id,
+                brand_id=brand_id,
+                attempts=attempts_before_call,
+            )
+        else:
+            # JIT download — drive_scout no longer pre-downloads; it just
+            # records the expected local path. If the file isn't on disk,
+            # fetch it from Drive now. Re-runs are a no-op once downloaded.
+            await _ensure_local_file(asset)
+            # Pre-publish ffmpeg transforms (brand-config driven). Returns the
+            # original path unchanged for brands with no `media_pipeline`
+            # entry for this platform — zero cost on the common path.
+            from glitch_signal.media.ffmpeg import apply_transforms
+            publish_file_path = await apply_transforms(
+                asset.file_path, brand_id or "", sp.platform
+            )
+            platform_post_id, platform_url = await _publish_to_platform(
+                sp.platform,
+                publish_file_path,
+                asset.script_id,
+                brand_id=brand_id,
+                attempts=attempts_before_call,
+            )
     except Exception as exc:
         log.error("publisher.failed", scheduled_post_id=scheduled_post_id, error=str(exc))
         await _handle_failure(scheduled_post_id, str(exc))
