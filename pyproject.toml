@@ -1,5 +1,5 @@
 [project]
-name = "glitch-social-media-agent"
+name = "glitch-grow-ai-social-media-agent"
 version = "0.1.0"
 description = "Autonomous social media identity agent — mines shipped artifacts, generates short-form video with AI models, publishes to YouTube Shorts / X / Instagram Reels, and manages ORM within hard guardrails."
 requires-python = ">=3.11"
@@ -103,8 +103,8 @@ dev = [
 #   TypeError: URL `dependencies` of field `project.urls` must be a string
 [project.urls]
 Homepage = "https://glitchexecutor.com"
-Repository = "https://github.com/glitch-exec-labs/glitch-social-media-agent"
-Issues = "https://github.com/glitch-exec-labs/glitch-social-media-agent/issues"
+Repository = "https://github.com/glitch-exec-labs/glitch-grow-ai-social-media-agent"
+Issues = "https://github.com/glitch-exec-labs/glitch-grow-ai-social-media-agent/issues"
 
 [build-system]
 requires = ["hatchling"]

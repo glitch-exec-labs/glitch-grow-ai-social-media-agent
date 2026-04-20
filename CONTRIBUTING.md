@@ -18,8 +18,8 @@ Thanks for your interest. This is a build-in-public project — contributions th
 ## Setup
 
 ```bash
-git clone https://github.com/glitch-exec-labs/glitch-social-media-agent
-cd glitch-social-media-agent
+git clone https://github.com/glitch-exec-labs/glitch-grow-ai-social-media-agent
+cd glitch-grow-ai-social-media-agent
 python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 ```

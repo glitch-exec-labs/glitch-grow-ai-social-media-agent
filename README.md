@@ -6,8 +6,8 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/glitch-exec-labs/glitch-social-media-agent/actions/workflows/ci.yml">
-    <img src="https://github.com/glitch-exec-labs/glitch-social-media-agent/actions/workflows/ci.yml/badge.svg" alt="CI">
+  <a href="https://github.com/glitch-exec-labs/glitch-grow-ai-social-media-agent/actions/workflows/ci.yml">
+    <img src="https://github.com/glitch-exec-labs/glitch-grow-ai-social-media-agent/actions/workflows/ci.yml/badge.svg" alt="CI">
   </a>
   <img src="https://img.shields.io/badge/python-3.11%2B-blue" alt="Python 3.11+">
   <img src="https://img.shields.io/badge/license-BSL%201.1-blue" alt="BSL 1.1">
@@ -139,8 +139,8 @@ All three are gated behind `DISPATCH_MODE=dry_run|live` and short-circuited to s
 
 ```bash
 # 1. Clone + install
-git clone https://github.com/glitch-exec-labs/glitch-social-media-agent
-cd glitch-social-media-agent
+git clone https://github.com/glitch-exec-labs/glitch-grow-ai-social-media-agent
+cd glitch-grow-ai-social-media-agent
 python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 
@@ -197,7 +197,7 @@ Layered config pattern:
 | `SIGNAL_DB_URL` | always | Postgres connection string |
 | `AUTH_ENCRYPTION_KEY` | always | Fernet key for `platform_auth` tokens + HMAC for OAuth / media state tokens |
 | `DISPATCH_MODE` | always | `dry_run` (no external calls) or `live` |
-| `VIDEO_STORAGE_PATH` | always | `/var/lib/glitch-social-media-agent/videos` |
+| `VIDEO_STORAGE_PATH` | always | `/var/lib/glitch-grow-ai-social-media-agent/videos` |
 | `DEFAULT_BRAND_ID` | always | `glitch_executor` or similar — used when no brand context |
 | `TELEGRAM_BOT_TOKEN_SIGNAL`, `TELEGRAM_ADMIN_IDS` | approval previews on | Telegram bot for approve/veto UX |
 | `ANTHROPIC_API_KEY` | ai_generated source | Claude Sonnet for script writing + ORM classifier |
@@ -708,18 +708,18 @@ Breakdown: `12 shots × 5s × $0.028/s = $1.68` + LLM `~$0.05` + storage `~negli
 ### systemd
 
 ```bash
-sudo cp ops/systemd/glitch-social-media-agent.service /etc/systemd/system/
+sudo cp ops/systemd/glitch-grow-ai-social-media-agent.service /etc/systemd/system/
 sudo systemctl daemon-reload
-sudo systemctl enable --now glitch-social-media-agent
+sudo systemctl enable --now glitch-grow-ai-social-media-agent
 ```
 
-The unit runs `uvicorn glitch_signal.server:app --host 127.0.0.1 --port 3111` under the `support` user, reads `/home/support/glitch-social-media-agent/.env` as EnvironmentFile, and hardens with `NoNewPrivileges`, `PrivateTmp`, `ProtectSystem=strict`, `ProtectHome=read-only` + an explicit `ReadWritePaths` for the repo + video-storage dir.
+The unit runs `uvicorn glitch_signal.server:app --host 127.0.0.1 --port 3111` under the `support` user, reads `/home/support/glitch-grow-ai-social-media-agent/.env` as EnvironmentFile, and hardens with `NoNewPrivileges`, `PrivateTmp`, `ProtectSystem=strict`, `ProtectHome=read-only` + an explicit `ReadWritePaths` for the repo + video-storage dir.
 
 ### Video storage
 
 ```bash
-sudo mkdir -p /var/lib/glitch-social-media-agent/videos
-sudo chown -R support:support /var/lib/glitch-social-media-agent
+sudo mkdir -p /var/lib/glitch-grow-ai-social-media-agent/videos
+sudo chown -R support:support /var/lib/glitch-grow-ai-social-media-agent
 ```
 
 ### nginx (reverse proxy + TLS)
