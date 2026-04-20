@@ -249,7 +249,9 @@ async def _generate_slide_content(
         f"Write the carousel."
     )
 
-    mc = pick("smart" if settings().anthropic_api_key else "cheap")
+    s_ = settings()
+    tier = "smart" if (s_.openai_api_key or s_.anthropic_api_key) else "cheap"
+    mc = pick(tier)
     resp = await litellm.acompletion(
         model=mc.model,
         messages=[

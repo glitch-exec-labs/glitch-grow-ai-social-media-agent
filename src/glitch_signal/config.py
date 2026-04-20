@@ -32,6 +32,9 @@ class Settings(BaseSettings):
     # --- LLMs ---
     anthropic_api_key: str = ""
     google_api_key: str = ""
+    openai_api_key: str = ""
+    openai_smart_model: str = "gpt-4o"
+    openai_cheap_model: str = "gpt-4o-mini"
     vertex_project: str = ""
     vertex_location: str = "us-central1"
 

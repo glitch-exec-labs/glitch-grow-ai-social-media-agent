@@ -218,7 +218,13 @@ async def _write_post(
     )
     user_prompt = _build_user_prompt(signal)
 
-    mc = pick("smart" if settings().anthropic_api_key else "cheap")
+    # Prefer smart tier (OpenAI gpt-4o → Claude) when any high-quality
+    # provider key is configured; fall back to cheap (Gemini Flash) only if
+    # nothing smart is available. Voice guard rails are followed much more
+    # reliably by smart-tier models.
+    s_ = settings()
+    tier = "smart" if (s_.openai_api_key or s_.anthropic_api_key) else "cheap"
+    mc = pick(tier)
     raw = await _call_llm(
         mc,
         [
