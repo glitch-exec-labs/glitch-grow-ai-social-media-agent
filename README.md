@@ -1,7 +1,7 @@
-# Glitch Social Media Agent
+# Glitch Grow AI Social Media Agent
 
 <p align="center">
-  <strong>Multi-brand autonomous social media agent</strong><br>
+  <strong>Glitch Grow AI social media agent</strong><br>
   Two content sources × three publisher paths × N brands, all behind one gitignored <code>.env</code>
 </p>
 
@@ -16,6 +16,8 @@
 </p>
 
 ---
+
+> Part of **Glitch Grow**, the digital marketing domain inside **Glitch Executor Labs** — one builder shipping products across **Trade**, **Edge**, and **Grow**.
 
 **Built in public so you can run this on your own brand.** Brand configs (voice prompts, guardrail lists, watermark assets, Drive folder IDs) are private and live only on the deployed box — everything else is here.
 
