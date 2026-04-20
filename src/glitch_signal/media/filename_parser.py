@@ -30,6 +30,8 @@ from dataclasses import dataclass
 _PRODUCTS = (
     # Order matters — longer / more specific keys first so "fatloss" wins
     # before a generic regex could grab "fat".
+    #
+    # --- Namhya (human Ayurveda) ---
     "fatloss",
     "periods",
     "menopause",
@@ -43,19 +45,54 @@ _PRODUCTS = (
     "amla",
     "giloy", "guduchi",
     "shatavari",
-    "ashwagandha",
     "haritaki", "harad",
     "saffron",
     "mushroom",
     "immunity",
+    # --- Ayurpet (pet supplements + chews) ---
+    # Longer keys first to avoid prefix collisions.
+    "hip-o-joint", "hipojoint", "hipjoint",
+    "goodgut",
+    "coolcalm", "cool-calm",
+    "ashwagandha",                  # shared: Ayurpet chew + Namhya powder
+    "turmeric",                     # Ayurpet chew + general Ayurvedic stem
+    "hoj",                          # Ayurpet filename code for Hip-O-Joint
+    "gg",                           # Ayurpet filename code for GoodGut
+    "cc",                           # Ayurpet filename code for CoolCalm
+    "yak",                          # Ayurpet yak cheese chews
+    "joint",                        # Ayurpet joint-support framing
+    "arthritis",
+    "mobility",
+    "limping",
+    "dental",                       # Ayurpet yak chews angle
+    "calming",                      # Ayurpet calming chew / CoolCalm
+    "anxiety",                      # CoolCalm framing
 )
 
 # Canonicalise product spellings observed to internal SKU keys.
 _PRODUCT_ALIASES = {
+    # Namhya
     "diabetis":     "diabetes",
     "lung":         "lungs",
     "guduchi":      "giloy",
     "harad":        "haritaki",
+    # Ayurpet — normalise short codes + variants to catalog names
+    "hoj":          "hip-o-joint",
+    "hipjoint":     "hip-o-joint",
+    "hipojoint":    "hip-o-joint",
+    "gg":           "goodgut",
+    "cc":           "coolcalm",
+    "cool-calm":    "coolcalm",
+    # Framing keywords that map to the most-likely SKU so the rules-based
+    # caption prompt gets product context. Not lossy — the original word
+    # is preserved via `variant_tags` if the parser ever needs it.
+    "arthritis":    "hip-o-joint",
+    "mobility":     "hip-o-joint",
+    "limping":      "hip-o-joint",
+    "joint":        "hip-o-joint",
+    "anxiety":      "coolcalm",
+    "calming":      "coolcalm",
+    "dental":       "yak",          # dental framing → Himalayan yak chews
 }
 
 _GEOS = ("uk", "uae", "usa", "us")
