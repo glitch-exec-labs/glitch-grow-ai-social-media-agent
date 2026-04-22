@@ -53,19 +53,36 @@ async def post_one(row: QueuedPost) -> tuple[bool, str]:
         return True, "[dry-run] marked posted"
 
     target = row.platform.replace("upload_post_", "")
+    text = row.body.strip()
+    target_linkedin_page_id = block.get("target_linkedin_page_id") if target == "linkedin" else None
 
     try:
-        resp = await asyncio.to_thread(
-            _post_to_upload_post,
-            api_key=api_key,
-            user=user,
-            target=target,
-            text=row.body.strip(),
-            target_linkedin_page_id=block.get("target_linkedin_page_id") if target == "linkedin" else None,
-        )
+        if target == "linkedin":
+            # LinkedIn posts go out as PDF carousel document posts.
+            # The sheet body is the post description; a carousel PDF is
+            # generated from it and attached as the LinkedIn document.
+            # Carousels are LinkedIn's highest-engagement native format
+            # (~24% vs ~4% for text-only).
+            resp = await _post_linkedin_as_carousel(
+                api_key=api_key,
+                user=user,
+                brand_id=row.brand_id,
+                body=text,
+                target_linkedin_page_id=target_linkedin_page_id,
+                row_id=row.id,
+            )
+        else:
+            resp = await asyncio.to_thread(
+                _post_to_upload_post,
+                api_key=api_key,
+                user=user,
+                target=target,
+                text=text,
+                target_linkedin_page_id=None,
+            )
     except Exception as exc:
         log.warning("sheet_posting.upload_failed", row_id=row.id, error=str(exc)[:200])
-        return await _mark_failed(row, f"upload_text failed: {exc}")
+        return await _mark_failed(row, f"upload failed: {exc}")
 
     # Normalize the response — same handling as the foundation/launch scripts
     platform_post_id, post_url = _extract_post_identifiers(resp, target)
@@ -123,23 +140,79 @@ def _post_to_upload_post(
     return client.upload_text(**kwargs)
 
 
+async def _post_linkedin_as_carousel(
+    *,
+    api_key: str,
+    user: str,
+    brand_id: str,
+    body: str,
+    target_linkedin_page_id: str | None,
+    row_id: str,
+) -> dict:
+    """Generate a PDF carousel from the sheet body and post via upload_document.
+
+    The body becomes the LinkedIn post description; the PDF is the attached
+    document (LinkedIn's highest-engagement native format).
+    """
+    from glitch_signal.media.carousel_gen import generate_carousel_from_body
+
+    # Pick a sensible CTA link if the body contains one; fall back to org link
+    cta_link = "github.com/glitch-exec-labs"
+    for token in body.split():
+        t = token.strip(".,!?")
+        if "github.com/glitch-exec-labs" in t or "glitchexecutor.com" in t:
+            cta_link = t
+            break
+
+    pdf_path = await generate_carousel_from_body(
+        body=body,
+        brand_id=brand_id,
+        cta_link=cta_link,
+    )
+
+    def _upload_doc() -> dict:
+        import upload_post
+
+        client = upload_post.UploadPostClient(api_key=api_key)
+        kwargs: dict = {
+            "document_path": str(pdf_path),
+            "title": f"Glitch — {row_id[:8]}",
+            "user": user,
+            "description": body,
+        }
+        if target_linkedin_page_id:
+            kwargs["target_linkedin_page_id"] = target_linkedin_page_id
+        return client.upload_document(**kwargs)
+
+    return await asyncio.to_thread(_upload_doc)
+
+
 def _extract_post_identifiers(resp: dict, target: str) -> tuple[str | None, str | None]:
-    """Pull (platform_post_id, post_url) out of Upload-Post's response shape."""
+    """Pull (platform_post_id, post_url) out of Upload-Post's response shape.
+
+    Handles three shapes:
+      - upload_text/photos: {"results": {"<platform>": {...post_id, url...}}}
+      - upload_text list:   {"results": [{"platform": "...", ...}]}
+      - upload_document:    flat {"request_id", "message"} when queued async,
+                            or {"results": {...}} when sync.
+    """
     if not isinstance(resp, dict):
         return None, None
     results = resp.get("results") or {}
+    block: dict = {}
     if isinstance(results, dict):
         block = results.get(target) or {}
     elif isinstance(results, list) and results:
         block = results[0] if isinstance(results[0], dict) else {}
-    else:
-        block = {}
     pid = (
         block.get("platform_post_id")
         or block.get("post_id")
         or (block.get("url", "").rsplit("/", 1)[-1] if block.get("url") else None)
     )
     url = block.get("post_url") or block.get("url")
+    # Fallback for background-accepted document uploads
+    if not pid and resp.get("request_id"):
+        pid = f"request:{resp['request_id']}"
     return pid, url
 
 

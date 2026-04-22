@@ -292,6 +292,118 @@ async def _generate_slide_content(
 
 
 # ---------------------------------------------------------------------------
+# Body-driven carousel: take a hand-written LinkedIn post body and structure
+# it into slides. Used by the sheet_posting pipeline when platform is
+# upload_post_linkedin — the sheet row's body becomes the post description
+# and the carousel PDF is the attached document.
+# ---------------------------------------------------------------------------
+
+_BODY_TO_SLIDES_SYSTEM = """You convert a polished LinkedIn post body into carousel slide content.
+
+The body is already good prose written in a specific brand voice. Your job is
+to RESTRUCTURE it into a tight slide deck — a hook slide, 4-5 body slides,
+and a CTA slide — without rewriting the voice or inventing claims.
+
+Rules:
+- Voice stays identical to the input body. Match its tone verbatim.
+- Do NOT add new claims, numbers, or ideas. Pull only what's already in the body.
+- Do NOT fabricate metrics. If the body doesn't state a number, neither do you.
+- Hook slide: lift the sharpest single idea from the body. Title ≤ 12 words.
+  Subtitle ≤ 18 words. Must make someone stop scrolling.
+- Body slides: 4 or 5 of them. Each one covers ONE idea from the post.
+  Title ≤ 8 words. Body ≤ 35 words. Never repeat the hook.
+- CTA slide: lift any link from the body (github.com/... or glitchexecutor.com)
+  and use it. If none, use github.com/glitch-exec-labs. Title ≤ 10 words.
+  Subtitle ≤ 18 words.
+- NO hype adjectives (seamless, robust, cutting-edge, etc.).
+- NO marketing verbs (delivers, boosts, reduces without a number backing it).
+- NO engagement-bait questions.
+
+Output JSON only, no markdown fences:
+{
+  "hook":  {"title": "<≤12 words>", "subtitle": "<≤18 words>"},
+  "body":  [{"title": "<≤8 words>", "body": "<≤35 words>"}, ...],
+  "cta":   {"title": "<≤10 words>", "subtitle": "<≤18 words>", "link": "<url>"}
+}
+"""
+
+
+@retry(
+    reraise=True,
+    stop=stop_after_attempt(4),
+    wait=wait_exponential(multiplier=1, min=2, max=30),
+    retry=retry_if_exception_type(
+        (litellm.ServiceUnavailableError, litellm.RateLimitError, litellm.APIConnectionError)
+    ),
+)
+async def _slides_from_body(
+    *, body: str, brand_id: str, cta_link: str, body_slides: int
+) -> dict[str, Any]:
+    cfg = brand_config(brand_id)
+    voice = _load_file(cfg.get("voice_prompt_path"))
+
+    system = (
+        f"{voice}\n\n"
+        f"---\n"
+        f"{_BODY_TO_SLIDES_SYSTEM}\n"
+        f"---\n"
+        f"Produce exactly {body_slides} body slides. CTA link fallback: {cta_link}"
+    )
+    user = f"The post body:\n\n{body}\n\nRestructure into the JSON schema."
+
+    s_ = settings()
+    tier = "smart" if (s_.openai_api_key or s_.anthropic_api_key) else "cheap"
+    mc = pick(tier)
+    resp = await litellm.acompletion(
+        model=mc.model,
+        messages=[
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ],
+        response_format={"type": "json_object"},
+        max_tokens=4096,
+        **mc.kwargs,
+    )
+    raw = resp.choices[0].message.content or "{}"
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise CarouselError(f"LLM returned invalid JSON: {exc} :: {raw[:200]!r}") from exc
+    if "hook" not in data or "body" not in data or "cta" not in data:
+        raise CarouselError(f"LLM output missing required keys: {list(data.keys())}")
+    return data
+
+
+async def generate_carousel_from_body(
+    body: str,
+    brand_id: str,
+    *,
+    body_slides: int = 5,
+    cta_link: str = "github.com/glitch-exec-labs",
+) -> pathlib.Path:
+    """Generate a PDF carousel from a hand-written LinkedIn post body.
+
+    Used by the sheet_posting pipeline: the post body becomes the LinkedIn
+    description; the returned PDF is uploaded as the document attachment.
+    """
+    slide_data = await _slides_from_body(
+        body=body,
+        brand_id=brand_id,
+        cta_link=cta_link,
+        body_slides=body_slides,
+    )
+    # Delegate the rendering path via slide_data_override — reuse the same
+    # fal.ai background gen + Pillow overlay + img2pdf compile we already have.
+    return await generate_carousel(
+        signal=None,
+        brand_id=brand_id,
+        body_slides=body_slides,
+        cta_link=cta_link,
+        slide_data_override=slide_data,
+    )
+
+
+# ---------------------------------------------------------------------------
 # fal.ai: generate one brand-consistent background per slide
 # ---------------------------------------------------------------------------
 
