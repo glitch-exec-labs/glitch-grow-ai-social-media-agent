@@ -77,8 +77,36 @@ async def _tick() -> None:
         _cleanup_posted_media(),
         _sweep_comments_tick(),
         _sheet_posting_tick(),
+        _sheet_reconcile_tick(),
         return_exceptions=True,
     )
+
+
+_sheet_reconcile_last: datetime | None = None
+
+
+async def _sheet_reconcile_tick() -> None:
+    """Every 10 minutes, backfill real platform_post_ids for rows whose
+    post was accepted asynchronously and only got a `request:xxx` placeholder
+    on first write."""
+    global _sheet_reconcile_last
+
+    if not settings().glitch_posts_sheet_id:
+        return
+
+    now = datetime.now(UTC).replace(tzinfo=None)
+    if _sheet_reconcile_last and (now - _sheet_reconcile_last) < timedelta(minutes=10):
+        return
+    _sheet_reconcile_last = now
+
+    try:
+        from glitch_signal.sheet_posting.reconciler import reconcile_pending
+
+        summary = await reconcile_pending()
+        if summary.get("reconciled"):
+            log.info("scheduler.sheet_reconcile_done", **summary)
+    except Exception as exc:
+        log.warning("scheduler.sheet_reconcile_failed", error=str(exc)[:200])
 
 
 _sheet_posting_last: datetime | None = None

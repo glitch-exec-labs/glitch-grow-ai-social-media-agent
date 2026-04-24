@@ -50,9 +50,18 @@ COMMENT_LOOKBACK_DAYS = 14
 # per-tick so one sweep doesn't spike the API budget.
 MAX_POSTS_PER_SWEEP = 20
 
-# Upload-Post platforms where get_post_comments works. Keep narrow to
-# avoid hitting an endpoint for platforms that don't support comment APIs.
-COMMENT_PLATFORMS = ("upload_post_linkedin", "upload_post_x")
+# Upload-Post's get_post_comments is hardcoded to Instagram only — the
+# SDK sends `platform=instagram` on every call regardless of the user's
+# actual platform, so passing an X or LinkedIn post_id results in
+# "Invalid post_id. The Instagram Graph API requires a numeric media ID."
+# and/or 429 rate-limit storms.
+#
+# Until Upload-Post exposes X / LinkedIn comment endpoints, we restrict
+# the sweeper to Instagram-published posts only. X/LinkedIn comments
+# need platform-native API integration (deferred — Twitter API v2 mentions
+# endpoint for X; LinkedIn doesn't expose arbitrary post comments to
+# third-party apps).
+COMMENT_PLATFORMS = ("upload_post_instagram",)
 
 
 async def sweep_comments() -> dict:
