@@ -2,7 +2,8 @@
 
 <p align="center">
   <strong>Glitch Grow AI social media agent</strong><br>
-  Two content sources × three publisher paths × N brands, all behind one gitignored <code>.env</code>
+  Three content pipelines (sheet-driven text/carousels, AI-generated video, Drive-footage video) ×
+  three publisher paths × N brands, all behind one gitignored <code>.env</code>
 </p>
 
 <p align="center">
@@ -32,6 +33,7 @@ Founder's time budget on social: **<30 min/week** (approvals only, not execution
 - [Quick start](#quick-start)
 - [Configuration](#configuration)
 - [Content sources](#content-sources)
+- [Sheet-driven posting pipeline](#sheet-driven-posting-pipeline)
 - [Publishers + vendor priority](#publishers--vendor-priority)
 - [TikTok OAuth flow](#tiktok-oauth-flow)
 - [Signed media URLs for vendors](#signed-media-urls-for-vendors)
@@ -46,12 +48,20 @@ Founder's time budget on social: **<30 min/week** (approvals only, not execution
 
 ## What it does
 
-The agent runs **two independent content-production paths** feeding into a **three-tier publisher** across **N brands**.
+The agent runs **three independent content-production paths** feeding into a **three-tier publisher** across **N brands**.
 
 ### Content sources
 
-1. **`ai_generated`** — mines GitHub commits and `MILESTONES.md` diffs for novel signals; LLM scores novelty ≥ 0.6; script → storyboard → per-shot video generation (Kling 2.0) → ffmpeg assemble with brand overlay → Gemini 2.5 Pro vision QC.
-2. **`drive_footage`** — polls a brand's Google Drive folder for pre-edited clips; downloads via service-account auth; LLM writes caption + hashtags per brand voice; skips the entire video-gen + assembler + QC chain (the footage is already post-ready).
+1. **`sheet_posting`** *(primary path today)* — operator-curated Google Sheet of post bodies; scheduler tick reads the next due row, routes by `content_type`:
+   - `text` → plain X / LinkedIn post via `upload_post.upload_text`
+   - `quote_card` → designed single image rendered by **gpt-image-2** (text inside the image, not a Pillow overlay) + body as caption, via `upload_photos`
+   - `carousel` → LinkedIn PDF document carousel: LLM splits the body into hook / 5 body slides / CTA, each rendered by gpt-image-2 with per-slide design archetypes (split-diagram, data-reveal, code-frame, asymmetric-stack, halo-focus), stitched with `img2pdf`, posted via `upload_document`. ~$1.19/carousel at quality=high all slides.
+
+   Per-brand worksheet tabs (`brand`, `founder`) keep voices isolated. A reconciler reads any `request:<id>` placeholder rows every 10 min and writes back the real `platform_post_id` once Upload-Post finalizes the async upload.
+
+2. **`ai_generated`** — mines GitHub commits and `MILESTONES.md` diffs for novel signals; LLM scores novelty ≥ 0.6; script → storyboard → per-shot video generation (Kling 2.0) → ffmpeg assemble with brand overlay → Gemini 2.5 Pro vision QC.
+
+3. **`drive_footage`** — polls a brand's Google Drive folder for pre-edited clips; downloads via service-account auth; LLM writes caption + hashtags per brand voice; skips the entire video-gen + assembler + QC chain (the footage is already post-ready).
 
 ### Publishers (tried in priority order per brand)
 
@@ -123,10 +133,13 @@ All three are gated behind `DISPATCH_MODE=dry_run|live` and short-circuited to s
 | Layer | Library |
 |---|---|
 | Agent orchestration | LangGraph 0.2+ |
-| LLM routing | LiteLLM (Claude Sonnet 4.6 for scripting, Gemini 2.5 Flash/Pro for scoring/QC/captions) |
+| LLM routing | LiteLLM — smart tier routes to OpenAI **gpt-4o** when `OPENAI_API_KEY` is set, else Claude Sonnet 4.6; cheap tier uses Gemini 2.5 Flash for scoring/captions, Pro for vision QC |
 | HTTP server | FastAPI + uvicorn (port 3111) |
 | Database | SQLModel + Alembic + asyncpg (PostgreSQL) |
 | Video assembly | ffmpeg-python |
+| Image generation | **fal.ai** — `openai/gpt-image-2` (designed images, in-image text) + `fal-ai/flux/schnell` (abstract backgrounds) |
+| Carousel assembly | gpt-image-2 per slide → `img2pdf` (Pillow overlay path retained as legacy fallback) |
+| Sheet integration | google-api-python-client (`spreadsheets.values.append/update`) — service-account auth |
 | Encryption | cryptography (Fernet for platform_auth + HMAC for state/media tokens) |
 | Drive ingestion | google-api-python-client + google-auth (service-account) |
 | Telegram | python-telegram-bot 21.6+ |
@@ -284,6 +297,94 @@ Pipeline per invocation:
 
 ---
 
+## Sheet-driven posting pipeline
+
+The dominant path on the Glitch Executor + Glitch Founder accounts today.
+Operator maintains a Google Sheet of post bodies; the scheduler tick reads
+the next due row, picks the right rendering path by `content_type`,
+publishes via Upload-Post, and writes the result back to the same row.
+
+### Sheet schema
+
+One worksheet tab per brand (`brand`, `founder`); columns identical:
+
+| Column | Purpose |
+|---|---|
+| `id` | UUID, key for write-back. Filled by the setup script. |
+| `brand_id` | `glitch_executor` \| `glitch_founder` |
+| `platform` | `upload_post_x` \| `upload_post_linkedin` |
+| `body` | Post text. For `quote_card` + `carousel` it doubles as the social-media caption shown alongside the image/PDF. |
+| `content_type` | `text` \| `quote_card` \| `carousel` (default: `carousel` for LinkedIn, `text` everywhere else) |
+| `status` | `queued` \| `posted` \| `failed` \| `skip` \| `draft` |
+| `scheduled_for` | ISO datetime. Empty = "as soon as pacing allows". |
+| `posted_at` / `post_url` / `platform_post_id` | Filled by poster on success. |
+| `notes` | Operator-only column; never read by code. |
+
+Pacing: minimum 4h between same `(brand, platform)` (env: `GLITCH_POSTS_MIN_INTERVAL_MINUTES`), daily cap 2 posts per pair (`GLITCH_POSTS_DAILY_CAP`).
+
+### Routing per `content_type`
+
+| `content_type` | Renderer | Vendor call | Cost |
+|---|---|---|---|
+| `text` | – | `upload_text` | ~$0 |
+| `quote_card` | gpt-image-2 (single designed image) + body as caption | `upload_photos` | ~$0.17/post |
+| `carousel` | gpt-image-2 ×7 slides → `img2pdf` | `upload_document` (LinkedIn doc post) | ~$1.19/post |
+
+### Carousel design system (April 2026 v2)
+
+LinkedIn document posts get **24%+ engagement** vs ~4% for text-only —
+worth doing right. The carousel pipeline:
+
+1. **LLM**: splits the post body into a structured deck — hook (≤12 word
+   title), 5 body slides, CTA — preserving the brand voice verbatim and
+   refusing to invent claims/metrics not present in the source body.
+2. **gpt-image-2**: one fully-designed slide per entry, **text rendered
+   inside the image by the model** (no Pillow overlay). All slides at
+   `quality=high` for retina-sharp typography.
+3. **Per-slide archetypes** rotate so consecutive slides don't look
+   identical: split-diagram, data-reveal (single large glyph), code-frame
+   (terminal-window aesthetic), asymmetric-stack (text + indicator
+   column), halo-focus (concentric ring composition). Hook and CTA are
+   bespoke hero compositions with depth fields and accent line elements.
+4. **Brand chrome** stays consistent across the deck: `GLITCH · EXECUTOR`
+   wordmark top-left, `NN / NN` counter top-right, progress bar bottom.
+5. **Native resolution**: 1080×1350 from gpt-image-2, supersampled to
+   2160×2700 with LANCZOS before PDF compile so text reads sharp on
+   LinkedIn's retina/mobile render.
+
+### Async X / document upload reconciler
+
+Upload-Post returns a `request_id` for X text posts and async document
+uploads — the real `platform_post_id` arrives later in a background
+worker. We write `request:<id>` into the sheet immediately and let
+`sheet_posting/reconciler.py` (scheduler tick, every ~10 min) call
+`get_status(request_id)` and back-fill the real id + url once vendor
+finalization completes. No webhook required.
+
+### Voice guard rails
+
+`text_writer` and `carousel_gen` both run a forbidden-terms regex pass
+(`game-changer`, `seamless`, `excited to announce`, etc.) and a per-voice
+strict-rule list before emitting content. A failure triggers an LLM
+regen with the violation cited, capped at 3 attempts before the row is
+flagged for manual review. Lists live per-brand in
+`brand/configs/<brand_id>.json` → `voice_guard.forbidden_terms`.
+
+### Triggering manually
+
+```python
+from glitch_signal.sheet_posting.reader import fetch_next_due
+from glitch_signal.sheet_posting.poster import post_one
+
+row = await fetch_next_due()           # respects pacing + cap + scheduled_for
+ok, msg = await post_one(row)          # renders + posts + writes back
+```
+
+The scheduler tick calls this once per run; manual invocation is for
+smoke-testing changes against the live sheet.
+
+---
+
 ## Publishers + vendor priority
 
 The agent supports three publisher tiers. `resolve_publish_platform(brand_id, target)` walks `_PUBLISH_PRIORITY` in `config.py` and picks the first enabled block:
@@ -394,7 +495,6 @@ Security properties:
 
 ---
 
-<<<<<<< HEAD
 ## Upload-Post webhooks
 
 The Upload-Post publisher hands the video to the vendor and returns immediately — it no longer blocks on `get_status`. Finalization (writing `PublishedPost`, flipping `scheduled_post.status` to `done`) happens when Upload-Post POSTs the `upload_completed` event to our `/webhooks/upload_post/<secret>` endpoint.
@@ -636,6 +736,16 @@ Preview messages include an inline keyboard for one-tap approve/veto. In multi-b
 
 ## Cost model
 
+### Per-post (sheet_posting path — primary today)
+
+| `content_type` | Per-post cost | Notes |
+|---|---|---|
+| `text` | ~$0.002 | Just the LLM voice-guard pass + Upload-Post call |
+| `quote_card` | ~$0.17 | One gpt-image-2 high-quality designed image + LLM distill |
+| `carousel` | ~$1.19 | 7× gpt-image-2 high-quality slides (each $0.17) + LLM split + img2pdf |
+
+At a typical mix (1 carousel + 3 text per brand per week, 2 brands): **~$10/month** of fal.ai + LLM spend for both accounts combined.
+
 ### Per-post (drive_footage path — pattern, vendor-published)
 
 | Line item | Cost |
@@ -687,11 +797,20 @@ Breakdown: `12 shots × 5s × $0.028/s = $1.68` + LLM `~$0.05` + storage `~negli
 - [x] Make.com credentials wired (no scenarios yet)
 - [x] Encrypted `platform_auth` (Fernet)
 
-### Phase 3 — Quality + analytics + wider ORM
-- [ ] Vision-based captioning (Gemini 2.5 Pro reads video → caption from actual content, not filename)
-- [ ] ffmpeg pre-publish transform (audio swap / crop / burn-in captions)
+### Phase 3 — Quality + analytics + wider ORM (mostly shipped 2026-04)
+- [x] Vision-based captioning (Gemini 2.5 Pro reads video → caption from actual content, not filename)
+- [x] ffmpeg pre-publish transform (`strip_audio` etc.)
+- [x] Webhook receivers for Upload-Post publish events (with reconcile-after-N-min fallback)
+- [x] **Sheet-driven text + carousel posting pipeline** (Google Sheet → Upload-Post)
+- [x] **fal.ai image generation** (FLUX-schnell backgrounds + gpt-image-2 designed images)
+- [x] **LinkedIn PDF carousel renderer** with per-slide design archetypes
+- [x] **Per-brand worksheet tabs** (brand / founder voice isolation)
+- [x] **Async post reconciler** for X / document uploads that vendor-accept then finalize later
+- [x] **Voice guard rails** — forbidden-terms regex + per-voice strict rules → LLM regen on violation
+- [x] **OpenAI gpt-4o** routing for smart-tier LLM calls (with Claude fallback)
+- [x] Comment sweeper (Instagram only — Upload-Post's get_post_comments is IG-hardcoded)
 - [ ] Analytics digest (weekly Telegram summary using `upload_post.get_analytics`)
-- [ ] Webhook receivers for Upload-Post publish/comment events (skip polling)
+- [ ] LinkedIn comment read/reply (blocked on Upload-Post adding `platform=linkedin` to their comments endpoint)
 - [ ] ORM for YouTube comments + Instagram DMs
 - [ ] MCP server on port 3112 (`trigger_scout`, `approve_post`, `veto_post`, `orm_summary`)
 

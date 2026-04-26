@@ -184,12 +184,13 @@ async def generate_carousel(
         ),
     ))
 
-    # Fire all slide generations in parallel. Hook + CTA use quality=high
-    # (bookend slides, worth the spend); body slides use medium.
+    # Fire all slide generations in parallel. Every slide uses quality=high —
+    # text rendering on the medium tier shows visible blur on LinkedIn's
+    # retina/mobile render at 1080+ widths, and the per-slide cost delta
+    # ($0.04 → $0.17) is worth it for a flagship-format deck. ~$1.19/carousel.
     async def _one(role: str, prompt: str) -> pathlib.Path:
-        q = "high" if role in ("hook", "cta") else "medium"
         return await generate_designed_image(
-            prompt=prompt, brand_id=brand_id, aspect="4:5", quality=q,
+            prompt=prompt, brand_id=brand_id, aspect="4:5", quality="high",
         )
 
     slide_png_paths = await asyncio.gather(*[_one(r, p) for r, p in specs])
@@ -452,68 +453,164 @@ def _build_slide_prompt(
 ) -> str:
     """Write a gpt-image-2 prompt that renders ONE fully designed slide.
 
-    Each slide carries:
-      - Brand chrome: GLITCH · EXECUTOR wordmark (top-left) + accent bar
-      - Slide counter `NN / NN` in the top-right (secondary color)
-      - A title block and a body/subtitle block, rendered BY THE MODEL
-      - Thin progress bar at the bottom, filled to (slide_num / slide_total)
-      - Wordmark footer on hook + cta slides
+    Design system (April 2026 v2):
+      - Each slide has a UNIQUE visual motif tied to its position/role, not
+        a single template repeated. gpt-image-2 is asked for actual graphic
+        elements — abstract diagrams, data viz, glyphs, depth fields — so
+        the deck reads as a designed object, not a slide template.
+      - Brand chrome (wordmark, counter, progress bar) stays consistent so
+        the deck still reads as a set.
+      - Hook + CTA are hero compositions with depth and a strong focal motif.
+      - Body slides cycle through layout archetypes (split-grid, full-bleed
+        graphic + caption, large numeric stat, asymmetric block) so no two
+        consecutive slides feel identical.
     """
     counter = f"{slide_num:02d} / {slide_total:02d}"
     progress_pct = int(100 * slide_num / slide_total)
 
+    # Brand chrome — kept consistent across the whole deck so it reads as a set.
     chrome = (
-        f"Deep black background color {base} with very subtle dark neon green "
-        f"circuit-pattern texture fading in from the corners and edges. "
-        f"Top-left corner: a small bright neon green vertical accent bar in "
-        f"color {accent}, followed by small uppercase monospace white text "
-        f"'GLITCH · EXECUTOR'. "
-        f"Top-right corner: small monospace text '{counter}' in "
-        f"electric blue color {secondary}. "
-        f"Bottom of the image: a thin horizontal progress bar, {progress_pct} percent "
-        f"filled in bright neon green {accent} on a dim gray track, spanning "
-        f"the width with 80px side margins."
+        f"Brand chrome (every slide carries these, drawn precisely):\n"
+        f"  • Top-left, 60px from top and 80px from left edge: a 4px-wide x "
+        f"36px-tall vertical bar in bright neon green {accent}, immediately "
+        f"followed by uppercase monospace 18pt white text 'GLITCH · EXECUTOR'.\n"
+        f"  • Top-right, 60px from top and 80px from right edge: monospace "
+        f"18pt text '{counter}' in electric blue {secondary}.\n"
+        f"  • Bottom, 50px from bottom edge, 80px side margins: a 3px-tall "
+        f"horizontal track in dim gray #2a2a2a spanning full width, with the "
+        f"left {progress_pct}% filled in bright neon green {accent}.\n"
+        f"  • Background: deep black {base} with very faint, large-scale "
+        f"isometric circuit-line texture in 4% opacity green, concentrated "
+        f"at the corners. Subtle, never busy.\n"
     )
+
+    # Pick a body-slide visual archetype that rotates through the deck so no
+    # two slides look the same. gpt-image-2 actually draws these motifs.
+    body_archetypes = [
+        # 1. Split layout — title block on top half, abstract diagram below
+        (
+            "SPLIT-DIAGRAM LAYOUT: Top 45% of frame is a clean text block, "
+            "left-aligned at 90px margin: large 72pt white headline "
+            f"'{title}', short {accent} underline bar (140px x 4px) directly "
+            f"beneath, then 30pt lighter-gray body text '{body}' wrapped to "
+            f"about 800px width. Bottom 45% of frame: a precise abstract "
+            f"line diagram in bright {accent} on the dark base — three "
+            f"connected nodes with directional arrows between them, "
+            f"thin 2px strokes, geometric, technical-blueprint feel. "
+            f"Diagram occupies center-bottom with even margins."
+        ),
+        # 2. Big-number / data-reveal layout
+        (
+            "DATA-REVEAL LAYOUT: Center the slide on ONE large graphic glyph "
+            f"rendered in {accent} at roughly 380pt — could be a stylized "
+            f"upward arrow, a fractured circle, a waveform, or a percentage "
+            f"sign — geometric and abstract, with 6% opacity duplicate "
+            f"echoes radiating outward for depth. Beneath the glyph, "
+            f"left-aligned at 90px: 56pt bold white headline '{title}' "
+            f"(can wrap to 2 lines), short {accent} underline, then 28pt "
+            f"lighter-gray body '{body}' wrapped to ~880px."
+        ),
+        # 3. Code-frame layout — terminal/IDE aesthetic
+        (
+            "CODE-FRAME LAYOUT: Center 70% of frame contains a stylized code "
+            "or terminal panel: a dark gray #161620 rectangle with rounded "
+            "8px corners, a 6px-tall macOS-style window header bar at top "
+            f"(three muted dots in dim red/yellow/green), and INSIDE the "
+            f"panel: 36pt bold white headline '{title}' on a single visible "
+            f"line, then a {accent} underline (120px), then 24pt monospace "
+            f"body text '{body}' rendered in monospace lighter gray, "
+            f"wrapped naturally. Outside the panel, 90px margins of dark "
+            f"base. Subtle drop shadow under the panel."
+        ),
+        # 4. Asymmetric stack — left text column, right vertical bar of accent dots
+        (
+            "ASYMMETRIC-STACK LAYOUT: Left two-thirds of frame: large 64pt "
+            f"bold white headline '{title}' anchored at 90px from left, "
+            f"vertically centered. Below it a short {accent} underline bar "
+            f"(140px x 4px), then 28pt lighter-gray body '{body}' wrapped "
+            f"to ~640px. Right one-third of frame: a vertical column of "
+            f"7 small {accent} squares (each 12x12px), evenly spaced, "
+            f"running from 200px to 950px down the right edge at 120px "
+            f"from the right — like a precision indicator track."
+        ),
+        # 5. Halo-focus layout — single concept at center with radial energy
+        (
+            "HALO-FOCUS LAYOUT: One concentric radial composition centered "
+            f"in the frame — a precise {accent} ring (320px diameter, 3px "
+            f"stroke) with three smaller faded green concentric rings "
+            f"echoing outward (8% opacity each). At the center of the ring, "
+            f"in 36pt bold white, a single 1-3 word punchline lifted from "
+            f"'{title}'. Below the entire halo, 90px margins, left-aligned: "
+            f"36pt bold white full headline '{title}', a short {accent} "
+            f"underline, then 24pt lighter-gray body '{body}'."
+        ),
+    ]
 
     if role == "hook":
         composition = (
-            "Main composition centered vertically, left-aligned with 90px "
-            "margins. Large bold sans-serif white headline text rendered as "
-            f"the title line: '{title}'. Below the title, a short bright "
-            f"neon green underline accent bar in color {accent}. Below that, "
-            f"medium-sized lighter-gray subtitle text: '{body}'. "
-            "Bottom-left above the progress bar: small monospace text "
-            "'glitchexecutor.com' in muted light gray, followed by a tiny "
-            f"blue {secondary} pip."
+            "HOOK / COVER LAYOUT — this is the hero slide of the deck.\n"
+            f"  • Large depth field: behind the text, a softly glowing "
+            f"radial gradient from a single bright {accent} focal point at "
+            f"roughly 40% from top, 60% from left, fading to dark base at "
+            f"the edges. 25% opacity max — atmospheric, not loud.\n"
+            f"  • Headline block, vertically centered, left-aligned at 90px: "
+            f"OVERSIZED 96pt bold sans-serif white headline '{title}' "
+            f"wrapped naturally to 2-3 lines. Tight letter-spacing, strong "
+            f"baseline grid.\n"
+            f"  • Directly beneath the headline: a 200px x 6px solid "
+            f"{accent} bar, then 8px gap, then 32pt lighter-gray "
+            f"subtitle '{body}' wrapped to ~880px.\n"
+            f"  • Bottom-left, 90px from left, 100px from bottom (above the "
+            f"progress bar): tiny 16pt monospace 'glitchexecutor.com' in "
+            f"#888 muted gray, followed by a 10x10px {secondary} square pip "
+            f"with 12px gap.\n"
+            f"  • Decorative asymmetric line element in {accent}: a single "
+            f"thin 1px diagonal line running from top-right corner area "
+            f"down-left for ~280px, ending in a small filled circle. "
+            f"Adds graphic energy without crowding the text."
         )
     elif role == "cta":
-        composition = (
-            "Main composition centered, with upward convergent energy — "
-            "brand sign-off feel. Large bold sans-serif white headline: "
-            f"'{title}'. Thin bright neon green {accent} underline below. "
-            f"Medium subtitle text in lighter gray: '{body}'. "
-            f"{'Below the subtitle: the URL ' + link + ' rendered in neon green ' + accent + ' monospace, fitting within the 900px content width.' if link else ''} "
-            "Bottom-left above the progress bar: small monospace text "
-            "'glitchexecutor.com' in muted gray with a tiny blue pip next to it."
+        link_block = (
+            f"  • Below the subtitle, 24px gap: the URL '{link}' rendered in "
+            f"24pt monospace bold {accent}, fitting cleanly in 880px width.\n"
+            if link else ""
         )
-    else:  # body
         composition = (
-            "Main composition centered vertically, left-aligned with 90px "
-            "margins. Large bold sans-serif white headline on 1-2 lines: "
-            f"'{title}'. Short bright neon green {accent} underline bar "
-            f"beneath the title. Medium body text in lighter gray on 2-3 "
-            f"short lines: '{body}'. Plenty of breathing room above and "
-            "below the text block."
+            "CTA / CLOSING LAYOUT — sign-off slide with upward energy.\n"
+            f"  • Background depth: an upward-converging line field — six "
+            f"thin {accent} lines at 1-2px stroke, fanning from offscreen "
+            f"bottom-center upward toward a vanishing point near the top "
+            f"third, 15% opacity. Faint perspective grid feel.\n"
+            f"  • Headline block, vertically centered, left-aligned at 90px: "
+            f"72pt bold white '{title}' on 1-2 lines, then a 200px x 6px "
+            f"{accent} bar, then 30pt lighter-gray subtitle '{body}' "
+            f"wrapped to ~880px.\n"
+            f"{link_block}"
+            f"  • Bottom-left, above the progress bar: 16pt monospace "
+            f"'glitchexecutor.com' in #888, followed by a {secondary} pip.\n"
+            f"  • Top-right area below the counter: a small geometric "
+            f"closing glyph in {accent} — three stacked horizontal bars of "
+            f"decreasing length, ~24px tall total. Quiet sign-off mark."
         )
+    else:  # body — pick archetype by slide_num so consecutive slides differ
+        # Skip slide_num=1 (hook) — body starts at slide 2
+        archetype_idx = (slide_num - 2) % len(body_archetypes)
+        composition = body_archetypes[archetype_idx]
 
     return (
-        f"A LinkedIn carousel slide, 4:5 portrait format, part of a cohesive "
-        f"set of {slide_total}. Glitch Executor brand aesthetic — dark, "
-        f"minimal, tech-lab, professional. No humans, no emojis, no clipart, "
-        f"no photos. Clean geometric sans-serif typography throughout. "
-        f"All text must render with perfect spelling.\n\n"
-        f"{chrome}\n\n"
-        f"{composition}"
+        f"A LinkedIn document-carousel slide rendered in 4:5 portrait. "
+        f"Slide {slide_num} of {slide_total} in a cohesive Glitch Executor "
+        f"deck. Aesthetic: dark editorial tech magazine, designed not "
+        f"templated. Think Stripe Press meets a16z research report meets a "
+        f"production-grade engineering blog. Premium, intentional, "
+        f"every element placed for a reason.\n\n"
+        f"FORBIDDEN: humans, faces, hands, photographs, emoji, clipart, "
+        f"stock vectors, generic isometric people, generic 'tech' bokeh. "
+        f"REQUIRED: clean geometric sans-serif typography, perfect "
+        f"spelling, sharp 1-2px strokes for diagrams, true black background, "
+        f"intentional negative space.\n\n"
+        f"{chrome}\n"
+        f"Slide composition for this specific slide:\n{composition}\n"
     )
 
 
@@ -766,9 +863,24 @@ def _load_file(path: str | None) -> str:
 # ---------------------------------------------------------------------------
 
 def _compile_pdf(slide_paths: list[pathlib.Path], pdf_path: pathlib.Path) -> None:
+    """Compile PNGs into a PDF. Upscales each slide to 2160x2700 with LANCZOS
+    before stitching — gpt-image-2 outputs 1080x1350 which still shows mild
+    softness on retina/mobile. 2x supersampling cleans up perceived sharpness
+    of rendered text without re-running the model.
+    """
+    import io
+
     import img2pdf
 
-    # img2pdf handles RGB PNGs natively — no reencoding, lossless
-    raw_bytes = [p.read_bytes() for p in slide_paths]
+    target_w, target_h = 2160, 2700
+    raw_bytes: list[bytes] = []
+    for p in slide_paths:
+        with Image.open(p) as img:
+            img = img.convert("RGB")
+            if img.size != (target_w, target_h):
+                img = img.resize((target_w, target_h), Image.LANCZOS)
+            buf = io.BytesIO()
+            img.save(buf, format="PNG", optimize=False)
+            raw_bytes.append(buf.getvalue())
     with open(pdf_path, "wb") as fh:
         fh.write(img2pdf.convert(raw_bytes))
