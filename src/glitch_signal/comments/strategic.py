@@ -408,41 +408,70 @@ async def approve_strategic(sr_id: str) -> tuple[bool, str]:
             f"posts. Paste this into the comment box:\n\n{row.drafted_reply}"
         )
 
-    # X path: post via upload_text + quote_tweet_id (quote-reply rather than
-    # threaded reply — still engages with the post and surfaces in our feed).
-    if not user or not api_key or not row.target_post_id:
-        return False, "missing X user / api_key / target_post_id"
+    # X path: prefer the native /2/tweets endpoint (true threaded reply
+    # via in_reply_to_tweet_id), fall back to Upload-Post quote_tweet_id
+    # if our own token is unavailable. Native gives us the real reply
+    # placement in the conversation; Upload-Post can only quote-tweet.
+    if not row.target_post_id:
+        return False, "missing target_post_id"
+
+    posted_id: str | None = None
+    via: str | None = None
 
     try:
-        resp = await asyncio.to_thread(
-            _post_x_quote_reply,
-            api_key,
-            user,
+        from glitch_signal.integrations.x import XClient
+        x = XClient(row.brand_id)
+        result = await x.post_tweet(
             row.drafted_reply,
-            row.target_post_id,
+            in_reply_to_tweet_id=row.target_post_id,
         )
-    except Exception as exc:
-        async with _session_factory()() as session:
-            row = await session.get(StrategicReply, sr_id)
-            if row:
-                row.status = "failed"
-                row.updated_at = datetime.now(UTC).replace(tzinfo=None)
-                session.add(row)
-                await session.commit()
-        return False, f"X quote-reply failed: {exc}"
+        posted_id = result.tweet_id
+        via = "native-reply"
+    except Exception as native_exc:
+        log.info(
+            "strategic.x_native_unavailable_falling_back_to_upload_post",
+            sr_id=sr_id, error=str(native_exc)[:200],
+        )
+        if not user or not api_key:
+            async with _session_factory()() as session:
+                fail_row = await session.get(StrategicReply, sr_id)
+                if fail_row:
+                    fail_row.status = "failed"
+                    fail_row.updated_at = datetime.now(UTC).replace(tzinfo=None)
+                    session.add(fail_row)
+                    await session.commit()
+            return False, f"native X failed and no Upload-Post fallback: {native_exc}"
+        try:
+            resp = await asyncio.to_thread(
+                _post_x_quote_reply,
+                api_key,
+                user,
+                row.drafted_reply,
+                row.target_post_id,
+            )
+            via = "upload-post-quote"
+            posted_id = resp.get("request_id") if isinstance(resp, dict) else None
+        except Exception as exc:
+            async with _session_factory()() as session:
+                fail_row = await session.get(StrategicReply, sr_id)
+                if fail_row:
+                    fail_row.status = "failed"
+                    fail_row.updated_at = datetime.now(UTC).replace(tzinfo=None)
+                    session.add(fail_row)
+                    await session.commit()
+            return False, f"X reply failed: native={native_exc!s}; fallback={exc!s}"
 
     async with _session_factory()() as session:
-        row = await session.get(StrategicReply, sr_id)
-        if row:
-            row.status = "posted"
-            row.posted_platform_post_id = (
-                resp.get("request_id") if isinstance(resp, dict) else None
-            )
-            row.updated_at = datetime.now(UTC).replace(tzinfo=None)
-            session.add(row)
+        ok_row = await session.get(StrategicReply, sr_id)
+        if ok_row:
+            ok_row.status = "posted"
+            ok_row.posted_platform_post_id = posted_id
+            ok_row.updated_at = datetime.now(UTC).replace(tzinfo=None)
+            session.add(ok_row)
             await session.commit()
 
-    return True, "Quote-reply posted on X."
+    suffix = f" ({via})" if via else ""
+    return True, f"Reply posted on X{suffix}."
 
 
 async def veto_strategic(sr_id: str) -> tuple[bool, str]:

@@ -500,17 +500,36 @@ async def approve_reply(comment_reply_id: str) -> tuple[bool, str]:
             return False, f"no Upload-Post user for {row.brand_id}.{row.platform}"
 
     api_key = settings().upload_post_api_key
-    if not api_key:
-        return False, "UPLOAD_POST_API_KEY unset"
 
+    posted_id: str | None = None
     try:
-        resp = await asyncio.to_thread(
-            _post_reply,
-            api_key,
-            user,
-            row.platform_comment_id,
-            row.drafted_reply,
-        )
+        if row.platform == "upload_post_x":
+            # X mentions: Upload-Post hardcodes platform=instagram on the
+            # comments/reply endpoint, so it physically can't post a reply
+            # on X. Use the native /2/tweets reply path instead.
+            from glitch_signal.integrations.x import XClient
+            x = XClient(row.brand_id)
+            result = await x.post_tweet(
+                row.drafted_reply,
+                in_reply_to_tweet_id=row.platform_comment_id,
+            )
+            posted_id = result.tweet_id
+        else:
+            # IG (and any future Upload-Post-supported platform) goes
+            # through the vendor reply_to_comment endpoint.
+            if not api_key:
+                return False, "UPLOAD_POST_API_KEY unset"
+            resp = await asyncio.to_thread(
+                _post_reply,
+                api_key,
+                user,
+                row.platform_comment_id,
+                row.drafted_reply,
+            )
+            posted_id = (
+                resp.get("id") or resp.get("reply_id") or resp.get("request_id")
+                if isinstance(resp, dict) else None
+            )
     except Exception as exc:
         async with _session_factory()() as session:
             row = await session.get(CommentReply, comment_reply_id)
@@ -525,15 +544,12 @@ async def approve_reply(comment_reply_id: str) -> tuple[bool, str]:
         row = await session.get(CommentReply, comment_reply_id)
         if row:
             row.status = "posted"
-            row.posted_reply_id = (
-                resp.get("id") or resp.get("reply_id") or resp.get("request_id")
-                if isinstance(resp, dict) else None
-            )
+            row.posted_reply_id = posted_id
             row.updated_at = datetime.now(UTC).replace(tzinfo=None)
             session.add(row)
             await session.commit()
 
-    log.info("comments.reply.posted", comment_reply_id=comment_reply_id)
+    log.info("comments.reply.posted", comment_reply_id=comment_reply_id, posted_id=posted_id)
     return True, "Reply posted."
 
 
