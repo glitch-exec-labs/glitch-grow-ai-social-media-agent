@@ -57,6 +57,20 @@ async def post_one(row: QueuedPost) -> tuple[bool, str]:
     target_linkedin_page_id = block.get("target_linkedin_page_id") if target == "linkedin" else None
     content_type = row.content_type or ("carousel" if target == "linkedin" else "text")
 
+    # Native LinkedIn path — replaces Upload-Post for upload_post_linkedin
+    # rows when LINKEDIN_ACCESS_TOKEN is configured. Returns the real
+    # urn:li:share:... synchronously, so we skip the request:<id> reconcile
+    # for LinkedIn entirely. Falls through to Upload-Post on any error so
+    # one bad token doesn't stall the whole pipeline.
+    if target == "linkedin" and settings().linkedin_access_token:
+        try:
+            return await _post_via_linkedin_native(row=row, body=text, content_type=content_type)
+        except Exception as exc:
+            log.warning(
+                "sheet_posting.linkedin_native_failed_falling_back",
+                row_id=row.id, error=str(exc)[:300],
+            )
+
     try:
         if content_type == "quote_card":
             # Single designed image (gpt-image-2) + original body as caption
@@ -328,3 +342,100 @@ async def _write_audit_rows(
         )
         session.add(pp)
         await session.commit()
+
+
+# ---------------------------------------------------------------------------
+# Native LinkedIn path (Marketing Developer Platform)
+# ---------------------------------------------------------------------------
+
+async def _post_via_linkedin_native(
+    *, row: QueuedPost, body: str, content_type: str,
+) -> tuple[bool, str]:
+    """Publish a sheet row through LinkedIn's direct API instead of Upload-Post.
+
+    Routes by content_type and brand:
+      - text       -> /rest/posts (commentary only)
+      - quote_card -> not yet implemented natively; raises so caller falls back
+      - carousel   -> /rest/documents (initialize → upload PDF) + /rest/posts
+
+    Author URN switches by brand:
+      - glitch_founder   -> Tejas's person URN (w_member_social)
+      - glitch_executor  -> Glitch Executor company URN (w_organization_social)
+
+    Returns (ok, msg). Same shape as post_one() so the caller can use it
+    transparently. Writes status/posted_at/post_url/platform_post_id back
+    to the sheet on success and creates the same audit rows as the
+    Upload-Post path.
+    """
+    from glitch_signal.integrations.linkedin import (
+        LinkedInError,
+        author_urn_for,
+        client_from_settings,
+    )
+
+    client = client_from_settings()
+    if client is None:
+        raise LinkedInError("LinkedInClient not configured")
+
+    author_urn = author_urn_for(row.brand_id)
+    if not author_urn:
+        raise LinkedInError(
+            f"no LinkedIn author URN configured for brand_id={row.brand_id}"
+        )
+
+    if content_type == "carousel":
+        # Reuse the existing carousel render — gpt-image-2 + img2pdf.
+        from glitch_signal.media.carousel_gen import generate_carousel_from_body
+
+        cta_link = "github.com/glitch-exec-labs"
+        for token in body.split():
+            t = token.strip(".,!?")
+            if "github.com/glitch-exec-labs" in t or "glitchexecutor.com" in t:
+                cta_link = t
+                break
+
+        pdf_path = await generate_carousel_from_body(
+            body=body, brand_id=row.brand_id, cta_link=cta_link,
+        )
+        upload_url, document_urn = await client.register_document_upload(author_urn)
+        await client.upload_pdf(upload_url, str(pdf_path))
+        # LinkedIn needs a moment to process the PDF before /rest/posts
+        # accepts the document URN. AVAILABLE typically lands in 5-15s.
+        await client.wait_for_document(document_urn, timeout_s=120)
+        result = await client.post_document(
+            author_urn=author_urn,
+            commentary=body,
+            document_urn=document_urn,
+            title=f"Glitch — {row.id[:8]}",
+        )
+    elif content_type == "text":
+        result = await client.post_text(author_urn=author_urn, commentary=body)
+    else:
+        # quote_card: image post via /rest/posts not yet implemented; let
+        # the caller fall back to Upload-Post for now.
+        raise LinkedInError(
+            f"native LinkedIn path doesn't yet support content_type={content_type!r}"
+        )
+
+    log.info(
+        "sheet_posting.linkedin_native_posted",
+        row_id=row.id,
+        brand_id=row.brand_id,
+        author_urn=author_urn,
+        post_urn=result.post_urn,
+    )
+
+    await _write_result(
+        row,
+        status="posted",
+        post_url=result.post_url,
+        platform_post_id=result.post_urn,
+    )
+    try:
+        await _write_audit_rows(row, result.post_urn, result.post_url)
+    except Exception as exc:
+        log.warning(
+            "sheet_posting.linkedin_native_audit_write_failed",
+            row_id=row.id, error=str(exc)[:200],
+        )
+    return True, "posted (linkedin native)"

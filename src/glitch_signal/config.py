@@ -144,6 +144,33 @@ class Settings(BaseSettings):
     # "upload_post_instagram", etc. See platforms/upload_post.py.
     upload_post_api_key: str = ""
 
+    # --- LinkedIn direct API (Marketing Developer Platform) ---
+    # When set, the sheet-posting pipeline routes upload_post_linkedin rows
+    # through LinkedIn's native /rest/posts + /rest/documents endpoints
+    # instead of Upload-Post. Removes vendor latency, returns the real
+    # urn:li:share:... synchronously, and supports comment read/reply on
+    # company-page posts (r_organization_social).
+    #
+    # Scopes required for full functionality:
+    #   w_member_social         — post on the founder's profile
+    #   w_organization_social   — post on the company page
+    #   r_organization_social   — read comments on company-page posts
+    #   rw_organization_admin   — verify admin role on the company at OAuth
+    # Comment read on the founder's *personal* posts requires r_member_social
+    # (Community Management API for Members) which is a separate approval.
+    linkedin_client_id: str = ""
+    linkedin_client_secret: str = ""
+    linkedin_redirect_uri: str = ""
+    linkedin_access_token: str = ""
+    linkedin_refresh_token: str = ""
+    # API version pinned to a known-good release; bump when migrating.
+    # Format: YYYYMM. See linkedin/marketing/versioning docs.
+    linkedin_api_version: str = "202604"
+    # Pre-cached URNs so we don't have to call /v2/userinfo on every post.
+    # Founder = Tejas's Person URN; brand_org = Glitch Executor company URN.
+    linkedin_founder_person_urn: str = ""
+    linkedin_brand_org_urn: str = "urn:li:organization:111931921"
+
     # --- Buffer (third partner, GraphQL) ---
     # Added 2026-04-19 specifically for TikTok AI-voice content: Upload-Post
     # re-muxes server-side and triggers TikTok's synthetic-media mute on
