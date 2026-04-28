@@ -263,6 +263,10 @@ class CommentReply(SQLModel, table=True):
     # new | drafted | pending_approval | posted | ignored | failed
     drafted_reply: str | None = None
     posted_reply_id: str | None = None
+    # Discord approval tracking. Set when the host bot posts the
+    # approval embed; cleared / unused once the row is terminal.
+    discord_message_id: str | None = None
+    discord_channel_id: str | None = None
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime | None = None
 

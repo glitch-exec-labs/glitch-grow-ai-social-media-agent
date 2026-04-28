@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import uuid
 from datetime import UTC, datetime, timedelta
 
@@ -429,43 +430,52 @@ def _strip_framing(text: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Telegram approval
+# Discord approval (replaces the Telegram surface as of 2026-04-28)
 # ---------------------------------------------------------------------------
 
 async def _send_approval_message(row: CommentReply) -> None:
-    token = settings().telegram_bot_token_signal
-    admin_ids = settings().admin_telegram_ids
-    if not token or not admin_ids:
-        log.warning("comments.approval.skipped_no_telegram", comment_reply_id=row.id)
+    """Post a Discord embed for this CommentReply in the configured channel,
+    seed ✅/❌ reactions, and persist the message_id so the host-bot plugin
+    can dispatch the operator's reaction back to approve_reply / veto_reply.
+    """
+    channel_id = os.environ.get("SOCIAL_MEDIA_AGENT_CHANNEL_ID", "").strip()
+    if not channel_id:
+        log.warning("comments.approval.skipped_no_discord_channel", comment_reply_id=row.id)
         return
 
-    from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
+    from glitch_signal.discord.formatter import comment_reply_embed
+    from glitch_signal.discord.rest import add_reaction, post_message
 
-    display = brand_config(row.brand_id).get("display_name", row.brand_id)
-    platform_label = row.platform.replace("upload_post_", "").upper()
+    embed = comment_reply_embed(row, state_override="pending_approval")
+    try:
+        msg = await post_message(channel_id, embeds=[embed])
+    except Exception as exc:
+        log.warning(
+            "comments.approval.discord_post_failed",
+            comment_reply_id=row.id, error=str(exc)[:300],
+        )
+        return
 
-    keyboard = InlineKeyboardMarkup([[
-        InlineKeyboardButton("Send reply", callback_data=f"rply_a:{row.id}"),
-        InlineKeyboardButton("Skip", callback_data=f"rply_v:{row.id}"),
-    ]])
+    msg_id = msg.get("id")
+    if msg_id:
+        # Seed reactions so operators can click instead of typing them.
+        for emoji in ("✅", "❌"):
+            try:
+                await add_reaction(channel_id, msg_id, emoji)
+            except Exception as exc:
+                log.debug("comments.approval.seed_reaction_failed", error=str(exc)[:200])
 
-    commenter = row.commenter_handle or row.commenter_name or "anon"
-    msg = (
-        f"[{display}] Comment reply — {platform_label}\n"
-        f"From: {commenter}\n"
-        f"ID: {row.id[:8]}\n"
-        f"───\n"
-        f"Their comment:\n{row.comment_text[:500]}\n\n"
-        f"───\n"
-        f"Drafted reply:\n{row.drafted_reply}"
-    )
-
-    bot = Bot(token=token)
-    for admin_id in admin_ids:
-        try:
-            await bot.send_message(chat_id=admin_id, text=msg, reply_markup=keyboard)
-        except Exception as exc:
-            log.warning("comments.approval.send_failed", admin_id=admin_id, error=str(exc))
+        # Persist the Discord message id so the host-bot plugin can match
+        # later reactions back to this row.
+        factory = _session_factory()
+        async with factory() as session:
+            stored = await session.get(CommentReply, row.id)
+            if stored:
+                stored.discord_message_id = str(msg_id)
+                stored.discord_channel_id = str(channel_id)
+                stored.updated_at = datetime.now(UTC).replace(tzinfo=None)
+                session.add(stored)
+                await session.commit()
 
 
 # ---------------------------------------------------------------------------
